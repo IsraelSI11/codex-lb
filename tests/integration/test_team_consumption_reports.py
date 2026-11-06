@@ -175,3 +175,125 @@ async def test_reports_preserve_missing_usage_shared_keys_and_cross_account_attr
     personal = (await async_client.get("/api/teams/usage", params={**params, "developer_id": "ana"})).json()
     assert personal["developers"][0]["requestCount"] == 3
     assert personal["unassigned"] == []
+
+
+@pytest.mark.parametrize(
+    "filters", [{"team_id": "default"}, {"developer_id": "scale"}, {"team_id": "default", "developer_id": "scale"}]
+)
+async def test_report_filters_and_sql_aggregation_bound_materialization(async_client, monkeypatch, filters):
+    from datetime import datetime
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import DashboardUser
+    from app.modules.accounts.usage_time_rollup import run_hourly_fold_pass
+
+    async with SessionLocal() as session:
+        session.add(DashboardUser(id="scale", username="scale", role_id="3fe0d2b1-4327-5931-befc-55e04f945100"))
+        await session.commit()
+    await async_client.post("/api/teams/default/members", json={"userId": "scale"})
+    other = (await async_client.post("/api/teams/", json={"name": "Other"})).json()["id"]
+    keys = []
+    for team, owner in (("default", "scale"), ("default", "scale"), ("default", None), (other, None)):
+        response = await async_client.post(
+            "/api/api-keys/", json={"name": "scale", "teamId": team, "ownerUserId": owner}
+        )
+        assert response.status_code == 200
+        keys.append(response.json()["id"])
+    start = datetime(2026, 3, 1)
+    async with SessionLocal() as session:
+        for hour in range(50):
+            for index, key in enumerate(keys):
+                session.add(
+                    RequestLog(
+                        api_key_id=key,
+                        request_id=f"scale-{hour}-{index}",
+                        model=f"model-{hour % 3}",
+                        input_tokens=2,
+                        output_tokens=3,
+                        status="success",
+                        latency_ms=1,
+                        requested_at=start + timedelta(hours=hour, minutes=30),
+                    )
+                )
+        await session.commit()
+    await run_hourly_fold_pass(now=start + timedelta(hours=49))
+    execute = AsyncSession.execute
+    materialized = []
+
+    async def measured_execute(self, statement, *args, **kwargs):
+        result = await execute(self, statement, *args, **kwargs)
+        sql = str(statement)
+        if "request_usage_hourly_rollups" in sql or "FROM request_logs" in sql:
+            frozen = result.freeze()
+            materialized.append((sql, len(frozen.data)))
+            return frozen()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", measured_execute)
+    response = await async_client.get(
+        "/api/teams/usage",
+        params={"start": start.isoformat(), "end": (start + timedelta(hours=50)).isoformat(), **filters},
+    )
+    assert response.status_code == 200
+    expected = 150 if filters == {"team_id": "default"} else 100
+    assert sum(row["requestCount"] for row in response.json()["teams"]) == expected
+    assert materialized
+    # At most the selected report dimensions, independent of hours/models/keys.
+    assert sum(count for _, count in materialized) <= 4
+    for sql, _ in materialized:
+        assert "sum(" in sql.lower()
+        if "team_id" in filters:
+            assert sql.count("coalesce(api_keys.team_id, :coalesce_1) = :coalesce_2") == 2
+        if "developer_id" in filters:
+            assert sql.count("api_keys.owner_user_id = :") == 2
+
+
+@pytest.mark.parametrize("start_minute,end_minute,expected", [(30, 150, 4), (65, 115, 2), (150, 210, 1)])
+async def test_report_partial_hour_edges_match_raw_across_fold(async_client, start_minute, end_minute, expected):
+    from datetime import datetime
+
+    from sqlalchemy import delete, select
+
+    from app.db.models import AccountUsageRollupState
+    from app.modules.accounts.usage_time_rollup import run_hourly_fold_pass
+
+    key = (await async_client.post("/api/api-keys/", json={"name": "edges"})).json()["id"]
+    start = datetime(2026, 4, 1)
+    async with SessionLocal() as session:
+        for minute in (15, 45, 75, 105, 135, 165):
+            session.add(
+                RequestLog(
+                    api_key_id=key,
+                    request_id=f"edge-{minute}",
+                    model="edge",
+                    input_tokens=2,
+                    reasoning_tokens=3,
+                    status="success",
+                    latency_ms=1,
+                    requested_at=start + timedelta(minutes=minute),
+                )
+            )
+        await session.commit()
+    params = {
+        "start": (start + timedelta(minutes=start_minute)).isoformat(),
+        "end": (start + timedelta(minutes=end_minute)).isoformat(),
+    }
+    before = await async_client.get("/api/teams/usage", params=params)
+    assert before.status_code == 200
+    assert before.json()["teams"][0]["requestCount"] == expected
+    assert before.json()["teams"][0]["totalTokens"] == expected * 5
+    await run_hourly_fold_pass(now=start + timedelta(hours=4))
+    async with SessionLocal() as session:
+        watermark = await session.scalar(select(AccountUsageRollupState.hourly_folded_through))
+        assert watermark == start + timedelta(hours=2)
+    after = await async_client.get("/api/teams/usage", params=params)
+    assert after.status_code == 200
+    assert after.json() == before.json()
+    # A missing state must ignore even existing hourly rows and use all raw.
+    async with SessionLocal() as session:
+        await session.execute(delete(AccountUsageRollupState))
+        await session.commit()
+    missing_state = await async_client.get("/api/teams/usage", params=params)
+    assert missing_state.status_code == 200
+    assert missing_state.json() == before.json()

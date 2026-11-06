@@ -123,6 +123,8 @@ class TeamsService:
         await self.changed()
 
     async def add_member(self, team_id: str, user_id: str) -> TeamResponse:
+        # Match removal/attribution: owner before team, including the INSERT FK check.
+        await self.repo.lock_membership_change(team_id, user_id)
         team = await self.require(team_id)
         if not await self.repo.user_exists(user_id):
             raise DashboardBadRequestError("Unknown developer")

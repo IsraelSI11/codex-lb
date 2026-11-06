@@ -8,13 +8,20 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import BigInteger, Integer, cast, func, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive
-from app.db.models import ApiKey, RequestLog
-from app.modules.accounts.usage_time_rollup import WARMUP_REQUEST_KINDS, from_dimension
-from app.modules.accounts.usage_time_rollup_read import raw_windows_clause, read_hourly_window
+from app.db.models import AccountUsageRollupState, ApiKey, RequestLog, RequestUsageHourlyRollup
+from app.modules.accounts.usage_time_rollup import (
+    _STATE_ROW_ID,
+    DIMENSION_SENTINEL,
+    HOURLY_BUCKET_SECONDS,
+    WARMUP_REQUEST_KINDS,
+    _dimension_expr,
+    epoch_seconds,
+)
+from app.modules.accounts.usage_time_rollup_read import ceil_to_grid, floor_to_grid
 from app.modules.teams.schemas import ConsumptionReport, ConsumptionTotal
 
 
@@ -46,49 +53,88 @@ async def consumption_report(
     session: AsyncSession, start: datetime, end: datetime, team_id: str | None, developer_id: str | None
 ) -> ConsumptionReport:
     since, until = to_utc_naive(start), to_utc_naive(end)
-    keys = list((await session.execute(select(ApiKey.id, ApiKey.team_id, ApiKey.owner_user_id))).all())
-    attribution = {row.id: (row.team_id, row.owner_user_id) for row in keys}
-    folded, windows = await read_hourly_window(session, since, until)
-    # One aggregate per key, including the disjoint raw tail and partial edges.
-    totals: dict[str, _UsageTotal] = defaultdict(_UsageTotal)
-    for row in folded:
-        if row.request_kind in WARMUP_REQUEST_KINDS:
-            continue
-        key_id = from_dimension(row.api_key_id)
-        if key_id is None:
-            continue
-        totals[key_id].add(
-            _UsageTotal(
-                row.request_count,
-                row.input_tokens + row.output_or_reasoning_tokens,
-                row.cached_input_tokens,
-                row.cost_usd,
-            )
+    # Both branches use one statement/snapshot of the watermark. Folded whole
+    # hours and raw partial edges/tail remain disjoint, including before backfill.
+    lo = ceil_to_grid(since, HOURLY_BUCKET_SECONDS)
+    hi = floor_to_grid(until, HOURLY_BUCKET_SECONDS)
+    watermark = (
+        select(AccountUsageRollupState.hourly_folded_through)
+        .where(AccountUsageRollupState.id == _STATE_ROW_ID)
+        .scalar_subquery()
+    )
+    postgres = session.get_bind().dialect.name == "postgresql"
+    watermark_epoch = (
+        cast(func.extract("epoch", watermark), BigInteger)
+        if postgres
+        else cast(func.strftime("%s", watermark), Integer)
+    )
+    least = func.least if postgres else func.min
+    greatest = func.greatest if postgres else func.max
+    tail_start = greatest(lo, least(func.coalesce(watermark, lo), hi))
+    team = func.coalesce(ApiKey.team_id, "default")
+    owner = ApiKey.owner_user_id
+    filters = []
+    if team_id is not None:
+        filters.append(team == team_id)
+    if developer_id is not None:
+        filters.append(owner == developer_id)
+    hourly = RequestUsageHourlyRollup
+    folded = (
+        select(
+            team.label("team"),
+            owner.label("owner"),
+            func.sum(hourly.request_count).label("requests"),
+            func.sum(hourly.input_tokens + hourly.output_or_reasoning_tokens).label("tokens"),
+            func.sum(hourly.cached_input_tokens).label("cached"),
+            func.sum(hourly.cost_usd).label("cost"),
         )
-    if windows:
-        rows = await session.execute(
-            select(
-                RequestLog.api_key_id,
-                func.count(),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0)
-                + func.coalesce(func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)), 0),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0),
-            )
-            .where(raw_windows_clause(windows), RequestLog.request_kind.not_in(WARMUP_REQUEST_KINDS))
-            .group_by(RequestLog.api_key_id)
+        .select_from(hourly)
+        .outerjoin(ApiKey, hourly.api_key_id == _dimension_expr(ApiKey.id))
+        .where(
+            hourly.bucket_epoch >= epoch_seconds(lo),
+            hourly.bucket_epoch < epoch_seconds(hi),
+            hourly.bucket_epoch < watermark_epoch,
+            hourly.api_key_id != DIMENSION_SENTINEL,
+            hourly.request_kind.not_in(WARMUP_REQUEST_KINDS),
+            *filters,
         )
-        for row in rows:
-            if row[0] is not None:
-                totals[row[0]].add(_UsageTotal(row[1], row[2], row[3], row[4]))
-    grouped: dict[tuple[str, str | None], _UsageTotal] = defaultdict(_UsageTotal)
-    for key_id, values in totals.items():
-        dimensions = attribution.get(key_id, ("default", None))
-        if team_id is not None and dimensions[0] != team_id:
-            continue
-        if developer_id is not None and dimensions[1] != developer_id:
-            continue
-        grouped[dimensions].add(values)
+        .group_by(team, owner)
+    )
+    raw = (
+        select(
+            team,
+            owner,
+            func.count(),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0)
+            + func.coalesce(func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)), 0),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0),
+        )
+        .select_from(RequestLog)
+        .outerjoin(ApiKey, RequestLog.api_key_id == ApiKey.id)
+        .where(
+            RequestLog.requested_at >= since,
+            RequestLog.requested_at < until,
+            or_(RequestLog.requested_at < lo, RequestLog.requested_at >= tail_start),
+            RequestLog.api_key_id.is_not(None),
+            RequestLog.request_kind.not_in(WARMUP_REQUEST_KINDS),
+            *filters,
+        )
+        .group_by(team, owner)
+    )
+    usage = union_all(folded, raw).subquery()
+    rows = await session.execute(
+        select(
+            usage.c.team,
+            usage.c.owner,
+            func.sum(usage.c.requests),
+            func.sum(usage.c.tokens),
+            func.sum(usage.c.cached),
+            func.sum(usage.c.cost),
+        ).group_by(usage.c.team, usage.c.owner)
+    )
+    # Only final report dimensions cross the wire, never keys or hourly grains.
+    grouped = {(row[0], row[1]): _UsageTotal(row[2], row[3], row[4], row[5]) for row in rows}
     teams: dict[str, _UsageTotal] = defaultdict(_UsageTotal)
     developers: dict[str, _UsageTotal] = defaultdict(_UsageTotal)
 

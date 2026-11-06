@@ -240,3 +240,87 @@ async def test_expired_invite_cleanup_retains_referenced_developers(async_client
     async with SessionLocal() as session:
         assert await DashboardUsersRepository(session).purge_expired_invited_users(utcnow()) == 0
         assert await session.get(DashboardUser, "invited") is not None
+
+
+@pytest.mark.parametrize(
+    "method,path", [("POST", "/api/teams/default/members"), ("DELETE", "/api/teams/default/members/lock-user")]
+)
+async def test_membership_mutations_lock_owner_before_team(async_client, monkeypatch, method, path):
+    from app.db.models import DashboardUser
+    from app.db.session import SessionLocal
+    from app.modules.teams.repository import TeamsRepository
+
+    async with SessionLocal() as session:
+        session.add(DashboardUser(id="lock-user", username="lock-user", role_id="3fe0d2b1-4327-5931-befc-55e04f945100"))
+        await session.commit()
+    events = []
+    lock = TeamsRepository.lock_membership_change
+    get = TeamsRepository.get
+
+    async def tracked_lock(self, team_id, user_id):
+        events.append("owner")
+        await lock(self, team_id, user_id)
+
+    async def tracked_get(self, team_id):
+        events.append("team")
+        return await get(self, team_id)
+
+    monkeypatch.setattr(TeamsRepository, "lock_membership_change", tracked_lock)
+    monkeypatch.setattr(TeamsRepository, "get", tracked_get)
+    response = await async_client.request(method, path, json={"userId": "lock-user"} if method == "POST" else None)
+    assert response.status_code == 200
+    assert events[:2] == ["owner", "team"]
+
+
+async def test_postgresql_add_waits_for_owner_without_holding_team(async_client, monkeypatch):
+    import asyncio
+
+    from sqlalchemy import select
+
+    from app.db.models import DashboardUser, Team
+    from app.db.session import SessionLocal
+    from app.modules.teams.repository import TeamsRepository
+    from app.modules.teams.service import TeamsService
+
+    async with SessionLocal() as setup:
+        if setup.get_bind().dialect.name != "postgresql":
+            pytest.skip("PostgreSQL row-lock interleaving requires a real PostgreSQL database")
+        setup.add(
+            DashboardUser(id="pg-lock-user", username="pg-lock-user", role_id="3fe0d2b1-4327-5931-befc-55e04f945100")
+        )
+        await setup.commit()
+    reached = asyncio.Event()
+    lock = TeamsRepository.lock_membership_change
+    get = TeamsRepository.get
+
+    async def tracked_lock(self, team_id, user_id):
+        reached.set()
+        await lock(self, team_id, user_id)
+
+    async def tracked_get(self, team_id):
+        team = await get(self, team_id)
+        reached.set()
+        return team
+
+    monkeypatch.setattr(TeamsRepository, "lock_membership_change", tracked_lock)
+    monkeypatch.setattr(TeamsRepository, "get", tracked_get)
+
+    async def add():
+        async with SessionLocal() as session:
+            await TeamsService(TeamsRepository(session)).add_member("default", "pg-lock-user")
+
+    # Removal owns the user first. Add must wait there, without acquiring team
+    # and closing the team -> user FK -> team cycle described in review Q1.
+    async with SessionLocal() as removal:
+        await removal.execute(select(DashboardUser.id).where(DashboardUser.id == "pg-lock-user").with_for_update())
+        task = asyncio.create_task(add())
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=5)
+            await removal.execute(select(Team.id).where(Team.id == "default").with_for_update(nowait=True))
+            await removal.rollback()
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            await removal.rollback()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

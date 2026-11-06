@@ -88,7 +88,7 @@
 - [ ] Run focused frontend tests, then `bun run test`, `bun run typecheck`, `bun run lint`, and `bun run build` from `frontend/`; expect all passing. Capture and visually inspect before/after views at desktop/mobile sizes.
 - [x] Sync normative requirements into `openspec/specs/team-consumption/`, keep rationale in context/design, and link user docs to that spec. Validate with `openspec validate --specs` and strict change validation. Do not edit CHANGELOG or release versions.
 - [ ] Run focused backend regressions followed by the project's unit/integration suites and `uv run pre-commit run local-ci --hook-stage manual --all-files` (or equivalent documented jobs if host tools prevent the wrapper). Report every unavailable gate explicitly rather than claiming PR readiness.
-- [ ] Obtain one fresh whole-branch code review; fix material findings with regression tests. Check migration topology, type/lint checks, diff whitespace and tracked secrets before publication.
+- [x] Obtain one fresh whole-branch code review and address material source findings with regression tests. Independent review completed in `.local/team-consumption-review.md`; corrective I1/Q1 disposition is recorded below. Available topology, scoped type/lint, whitespace and credential checks passed; unavailable global/real-PostgreSQL gates remain unchecked separately.
 - [ ] Publish only the approved feature branch to the user's fork; no upstream PR, merge, tags, or release. Archive OpenSpec only after verification succeeds.
 
 ## Execution record
@@ -118,3 +118,12 @@
 - Final feature slice passed 44; final key/proxy/file-continuity/scope slice passed 149; cache/sticky/peer invalidation slice passed 9. Final wheel rebuilt and assets plus team migration/module verified. Global gates and independent review remain explicitly outstanding in .local/team-consumption-implementation-report.md; no OpenSpec archive or PR-readiness claim.
 
 - Publication checkpoint: authorized scoped commits created: 4ea9c07 (OpenSpec/docs), 6e91167 (backend/migration/regressions), 02b8dbc (dashboard). Credential-pattern scan and diff whitespace check completed; remaining unchecked items retain unavailable global gates and coordinator-owned independent review. Publishing only origin feature/team-usage-and-budgets; archive deferred.
+
+
+## Corrective review disposition (2026-11-06)
+
+- Independent whole-feature review is complete; do not dispatch it again as pending implementation work. R1 migration replay was already fixed and verified (2 focused passes), unchanged by this correction.
+- I1 resolved: both hourly and raw report SQL apply team/developer predicates and aggregate to team/owner dimensions before materialization. A single UNION statement uses one watermark snapshot; no complete key inventory or hourly-grain list is loaded. The 50-hour regression ran RED at 192 materialized rows, then GREEN with bounded report dimensions; asserts filters occur in both SQL branches. All 9 final report tests passed, including retained-history parity, warmup/missing usage and direct missing/before-range/sub-hour/unaligned-edge coverage.
+- Q1 source inversion resolved: add_member now calls existing lock_membership_change before require, matching remove_member and attribution's owner-before-team order. Endpoint order regression ran RED for add, then GREEN for both operations. A controlled PostgreSQL regression holds the owner in one session and proves a waiting add cannot hold the team needed by removal; it is skipped explicitly on SQLite and has NOT run on real PostgreSQL.
+- Corrective focused team/API/report run: 29 passed, 1 PostgreSQL-only skipped; final expanded report-only run: 9 passed. Ruff check/format, scoped ty and diff whitespace exit 0. Evidence and technical explanation: `.local/team-consumption-review-fixes.md` plus `review-fixes-*.log`.
+- M1 optional UUID display polish deferred to keep this correction backend-only. No frontend files changed; no frontend reruns or package builds. Real PostgreSQL Alembic/locking, supported Linux and unrelated global gates remain unavailable; the earlier PostgreSQL 22 predates these final fixes and cannot verify them. OpenSpec remains active, not archived; no merge/release/readiness claim.
