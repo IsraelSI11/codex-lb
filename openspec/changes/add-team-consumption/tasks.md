@@ -39,7 +39,7 @@
 - [x] Run the new focused tests before implementation and confirm missing-feature failures.
 - [x] Implement tables, forward migration at the freshly inspected Alembic head, central team/membership/resource routes, and request-scoped dependencies. Keep default team creation idempotent and historical upgrade work bounded.
 - [x] Run `uv run pytest tests/integration/test_teams_api.py tests/integration/test_team_consumption_migration.py -q`; expect all passing. Run database upgrade/check and `python scripts/check_migration_topology.py` with the required script arguments from `make lint`; expect one valid head.
-- [ ] Review diff and make a scoped Conventional Commit only when authorized to commit.
+- [x] Review diff and make a scoped Conventional Commit only when authorized to commit.
 
 ## Task 2: Key attribution and effective eligibility
 
@@ -51,7 +51,7 @@
 - [x] Write scope tests: both unrestricted, team-only, key-only, intersection, explicit empty, shared account B, model sources, and cache invalidation after scope changes. Include sticky/file continuity and retries that previously selected a now-disallowed account.
 - [x] Run tests to confirm failures; implement attribution validation and central effective-scope resolution through the canonical auth/selection paths rather than patching each protocol independently.
 - [x] Run `uv run pytest tests/unit/test_api_keys_service.py tests/unit/test_api_keys_repository.py tests/integration/test_api_keys_api.py tests/unit/test_proxy_account_eligibility.py tests/integration/test_team_key_scopes.py -q`; expect all passing.
-- [ ] Review diff and make a scoped Conventional Commit only when authorized to commit.
+- [x] Review diff and make a scoped Conventional Commit only when authorized to commit.
 
 ## Task 3: Atomic shared budgets and complete reservation lifecycle
 
@@ -64,7 +64,7 @@
 - [x] Implement shared limits without duplicating the key accounting algorithm. Acquire deterministic locks, reserve both scopes in one transaction, retain attribution, and include both scopes in every existing finalization/recovery path. Preserve no-limit fast paths and warmup exclusions.
 - [ ] Run `uv run pytest tests/integration/test_team_budget_reservations.py tests/unit/test_limit_windows.py tests/unit/test_api_keys_service.py tests/unit/test_api_keys_repository.py tests/unit/test_proxy_api_key_usage.py tests/unit/test_proxy_api_key_usage_virtual_time.py -q`; expect passing. Run new concurrency tests with SQLite and PostgreSQL; PostgreSQL evidence is required before PR readiness.
 - [x] Add HTTP/WebSocket integration rejection assertions to the existing proxy tests and run them; expect the existing rate-limit envelopes with team-specific reset messages.
-- [ ] Review diff and make a scoped Conventional Commit only when authorized to commit.
+- [x] Review diff and make a scoped Conventional Commit only when authorized to commit.
 
 ## Task 4: Stable team and developer consumption reports
 
@@ -75,7 +75,7 @@
 - [x] Write fixtures with Ana in two teams, a shared key, service key, multiple upstream accounts, missing usage, warmup traffic, deleted raw logs, and identity/membership changes. Assert one request counts once per view; no team receives another team's usage; personal totals include both teams; unassigned stays explicit.
 - [x] Run tests to confirm missing behavior. Implement stable dimensions/backfill and bounded aggregation using existing retained rollups rather than unbounded raw-log scans. Do not reprice or reset budget counters as a reporting side effect.
 - [x] Run `uv run pytest tests/integration/test_team_consumption_reports.py tests/integration/test_request_usage_rollup_parity.py tests/integration/test_api_keys_trends_api.py tests/integration/test_usage_summary.py -q`; expect all passing.
-- [ ] Review diff and make a scoped Conventional Commit only when authorized to commit.
+- [x] Review diff and make a scoped Conventional Commit only when authorized to commit.
 
 ## Task 5: Dashboard, documentation, and whole-branch verification
 
@@ -116,3 +116,5 @@
 - Final regression fixes: preserved the existing disabled-owner 409 error; all dashboard-user API tests completed in a 62-pass run before the schema replay failure. Lost-ledger recovery ran RED on the new teams table, then GREEN after making the new revision idempotent; final full schema plus strengthened migration tests passed 22. Migration assertions now preserve legacy resource assignments and limit IDs/counters, removed memberships and non-Default attribution on replay, and schema parity after downgrade/re-upgrade.
 - Final retention audit: expired-invite cleanup could hit the new RESTRICT references; two focused tests ran RED, then the conditional purge was narrowed to unreferenced identities. All team API plus established expiry/owner-error regressions passed 23. SCIM owned-key regressions passed 3; final shared window tests passed 20; mixed-account/missing-usage/report-filter/fold parity passed 3.
 - Final feature slice passed 44; final key/proxy/file-continuity/scope slice passed 149; cache/sticky/peer invalidation slice passed 9. Final wheel rebuilt and assets plus team migration/module verified. Global gates and independent review remain explicitly outstanding in .local/team-consumption-implementation-report.md; no OpenSpec archive or PR-readiness claim.
+
+- Publication checkpoint: authorized scoped commits created: 4ea9c07 (OpenSpec/docs), 6e91167 (backend/migration/regressions), 02b8dbc (dashboard). Credential-pattern scan and diff whitespace check completed; remaining unchecked items retain unavailable global gates and coordinator-owned independent review. Publishing only origin feature/team-usage-and-budgets; archive deferred.
