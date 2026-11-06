@@ -525,6 +525,10 @@ class DashboardUsersRepository:
         committed in the meantime (status now ``active``) is never swept up.
         """
 
+        from app.db.models import TeamMember
+
+        referenced_key = select(ApiKey.id).where(ApiKey.owner_user_id == DashboardUser.id).exists()
+        referenced_member = select(TeamMember.user_id).where(TeamMember.user_id == DashboardUser.id).exists()
         expired_invite = (
             select(DashboardUserInvite.id)
             .where(DashboardUserInvite.user_id == DashboardUser.id)
@@ -544,7 +548,7 @@ class DashboardUsersRepository:
                 delete(DashboardUser)
                 .where(DashboardUser.status == DashboardUserStatus.INVITED.value)
                 .where(expired_invite)
-                .where(~live_invite)
+                .where(~live_invite, ~referenced_key, ~referenced_member)
                 .returning(DashboardUser.id)
                 .execution_options(synchronize_session=False)
             )
@@ -654,6 +658,13 @@ class DashboardUsersRepository:
         """
 
         await self._lock_owner(user_id)
+        from app.db.models import TeamMember
+
+        membership = (
+            select(TeamMember.team_id)
+            .where(TeamMember.team_id == ApiKey.team_id, TeamMember.user_id == ApiKey.owner_user_id)
+            .exists()
+        )
         owner_active = (
             select(DashboardUser.id)
             .where(DashboardUser.id == ApiKey.owner_user_id)
@@ -665,7 +676,7 @@ class DashboardUsersRepository:
             .where(ApiKey.owner_user_id == user_id)
             .where(ApiKey.is_active.is_(False))
             .where(ApiKey.deactivated_reason == ApiKeyDeactivatedReason.OWNER_DISABLED.value)
-            .where(owner_active)
+            .where(owner_active, membership)
             .values(is_active=True, deactivated_reason=None)
             .returning(ApiKey.key_hash)
             .execution_options(synchronize_session=False)
@@ -689,7 +700,7 @@ class DashboardUsersRepository:
         require_other_break_glass: bool = False,
         only_while_invited: bool = False,
     ) -> list[str] | None:
-        """Delete the account; its keys stay (owner cleared) but are inactive with the owner reason.
+        """Delete an unreferenced account; referenced developers must be disabled.
 
         With ``require_other_admin`` the DELETE only applies while another
         active admin exists; with ``only_while_invited`` only while the account
@@ -697,6 +708,19 @@ class DashboardUsersRepository:
         ``None`` means it was refused and everything (including the key
         cascade) was rolled back.
         """
+
+        from app.core.exceptions import DashboardConflictError
+        from app.db.models import TeamMember
+
+        await self._lock_owner(user.id)
+        referenced_key = await self._session.scalar(select(ApiKey.id).where(ApiKey.owner_user_id == user.id).limit(1))
+        membership = await self._session.scalar(
+            select(TeamMember.team_id).where(TeamMember.user_id == user.id).limit(1)
+        )
+        if referenced_key is not None or membership is not None:
+            raise DashboardConflictError(
+                "Developer is referenced by teams or keys; disable the account to retain history"
+            )
 
         try:
             hashes = await self.deactivate_owned_keys(user.id)

@@ -49,6 +49,9 @@ router = APIRouter(
 def _to_response(row: ApiKeyData) -> ApiKeyResponse:
     return ApiKeyResponse(
         id=row.id,
+        attribution_locked=row.attribution_locked,
+        team_id=row.team_id,
+        owner_user_id=row.owner_user_id,
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=row.allowed_models,
@@ -144,6 +147,8 @@ async def create_api_key(
         created = await context.service.create_key(
             ApiKeyCreateData(
                 name=payload.name,
+                team_id=payload.team_id,
+                owner_user_id=payload.owner_user_id,
                 allowed_models=payload.allowed_models,
                 apply_to_codex_model=payload.apply_to_codex_model,
                 enforced_model=payload.enforced_model,
@@ -204,6 +209,15 @@ async def update_api_key(
 
     limits_set = "limits" in fields or "weekly_token_limit" in fields
     limit_inputs = _build_limit_inputs(payload) if limits_set else None
+
+    if "team_id" in fields or "owner_user_id" in fields:
+        await context.repository.update_attribution(
+            key_id,
+            team_id=payload.team_id,
+            owner_user_id=payload.owner_user_id,
+            team_set="team_id" in fields,
+            owner_set="owner_user_id" in fields,
+        )
 
     update = ApiKeyUpdateData(
         name=payload.name,

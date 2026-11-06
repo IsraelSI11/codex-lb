@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, text, true, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, raiseload, selectinload
+from sqlalchemy.orm import joinedload, load_only, raiseload, selectinload
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -30,6 +30,8 @@ from app.db.models import (
     ModelSource,
     RequestLog,
     RequestUsageHourlyRollup,
+    Team,
+    TeamMember,
 )
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
@@ -159,12 +161,73 @@ class ApiKeysRepository:
             .execution_options(populate_existing=True)
             .options(
                 selectinload(ApiKey.limits),
+                joinedload(ApiKey.team).raiseload(Team.limits),
                 selectinload(ApiKey.account_assignments),
                 selectinload(ApiKey.source_assignments),
             )
         )
 
+    async def validate_attribution(self, team_id: str, owner_user_id: str | None) -> None:
+        from app.modules.api_keys.service import ApiKeyValidationError
+
+        if owner_user_id is not None and await self._owner_is_disabled(owner_user_id):
+            raise ApiKeyValidationError("Developer is disabled")
+        team = (
+            await self._session.execute(select(Team).where(Team.id == team_id).with_for_update())
+        ).scalar_one_or_none()
+        if team is None:
+            raise ApiKeyValidationError("Unknown team")
+        if owner_user_id is not None:
+            member = await self._session.get(TeamMember, (team_id, owner_user_id))
+            if member is None:
+                raise ApiKeyValidationError("Developer must be a team member")
+
+    async def has_usage(self, key_id: str) -> bool:
+        row = await self.get_by_id(key_id)
+        if row is not None and (row.last_used_at is not None or row.attribution_locked):
+            return True
+        for model in (RequestLog, ApiKeyUsageRollup, ApiKeyUsageReservation):
+            if (
+                await self._session.execute(select(model.api_key_id).where(model.api_key_id == key_id).limit(1))
+            ).first() is not None:
+                return True
+        return False
+
+    async def update_attribution(
+        self, key_id: str, *, team_id: str | None, owner_user_id: str | None, team_set: bool, owner_set: bool
+    ) -> None:
+        from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
+
+        row = await self.get_by_id(key_id)
+        if row is None:
+            raise DashboardNotFoundError("API key not found")
+        new_team = team_id if team_set else row.team_id
+        new_owner = owner_user_id if owner_set else row.owner_user_id
+        if (new_team, new_owner) == (row.team_id, row.owner_user_id):
+            return
+        if await self.has_usage(key_id):
+            raise DashboardConflictError("Used key attribution is immutable; create a replacement key")
+        if new_team is None:
+            raise DashboardBadRequestError("Team is required")
+        try:
+            await self.validate_attribution(new_team, new_owner)
+        except ValueError as exc:
+            raise DashboardBadRequestError(str(exc)) from exc
+        # Membership/owner locks precede the key lock, matching owner disable
+        # and bulk reactivation. Re-read usage after waiting for admission.
+        await self._lock_key(key_id)
+        if await self.has_usage(key_id):
+            raise DashboardConflictError("Used key attribution is immutable; create a replacement key")
+        row.team_id = new_team
+        row.owner_user_id = new_owner
+        await self._session.flush()
+
+    async def _lock_key(self, key_id: str) -> None:
+        # A no-op UPDATE also takes SQLite's writer lock across processes.
+        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(id=ApiKey.id))
+
     async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
+        await self.validate_attribution(row.team_id or "default", row.owner_user_id)
         self._session.add(row)
         if commit:
             await self._session.commit()
@@ -179,8 +242,8 @@ class ApiKeysRepository:
     async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None:
         """Admission-path load for ``enforce_limits_for_request``.
 
-        The enforcement transaction reads only ``is_active``/``expires_at``
-        plus the ``limits`` collection, so this skips the
+        The enforcement transaction reads status, immutable attribution and
+        key/team limits, so this skips the
         ``account_assignments``/``source_assignments`` selectin round trips
         that ``get_by_id`` pays on every proxied request. ``raiseload`` keeps
         the narrowing fail-loud: any future enforcement code that touches an
@@ -203,12 +266,25 @@ class ApiKeysRepository:
         may already hold a fully loaded ``ApiKey`` (e.g. via ``get_by_id`` /
         ``get_by_hash``) without dropping the narrowing first.
         """
+        # Persist the immutable-attribution marker before loading the team.
+        # An edit that wins the row lock is reflected in the SELECT; an edit
+        # that loses must reject the now-used key. Already locked keys need
+        # no further write, preserving the no-limit fast path after first use.
+        await self._session.execute(
+            update(ApiKey)
+            .where(ApiKey.id == key_id, ApiKey.attribution_locked.is_(False))
+            .values(attribution_locked=True)
+            .execution_options(synchronize_session=False)
+        )
         result = await self._session.execute(
             select(ApiKey)
             .execution_options(populate_existing=True)
             .options(
-                load_only(ApiKey.is_active, ApiKey.expires_at, raiseload=True),
+                load_only(
+                    ApiKey.is_active, ApiKey.expires_at, ApiKey.team_id, ApiKey.attribution_locked, raiseload=True
+                ),
                 selectinload(ApiKey.limits),
+                joinedload(ApiKey.team).selectinload(Team.limits),
                 raiseload(ApiKey.account_assignments),
                 raiseload(ApiKey.source_assignments),
             )
@@ -384,6 +460,7 @@ class ApiKeysRepository:
             # the disable cascade, which is a deadlock rather than a refusal.
             if await self._owner_is_disabled(row.owner_user_id):
                 raise ApiKeyOwnerDisabledError("The key's owner is disabled; re-enable the account first")
+            await self.validate_attribution(row.team_id, row.owner_user_id)
         if name is not _UNSET:
             assert isinstance(name, str)
             row.name = name
@@ -469,9 +546,14 @@ class ApiKeysRepository:
         return status == DashboardUserStatus.DISABLED.value
 
     async def delete(self, key_id: str) -> bool:
+        await self._lock_key(key_id)
         row = await self.get_by_id(key_id)
         if row is None:
             return False
+        if await self.has_usage(key_id):
+            from app.core.exceptions import DashboardConflictError
+
+            raise DashboardConflictError("Used keys must be deactivated to preserve consumption history")
         await self._session.execute(delete(ApiKeyUsageRollup).where(ApiKeyUsageRollup.api_key_id == key_id))
         await self._session.delete(row)
         await self._session.commit()

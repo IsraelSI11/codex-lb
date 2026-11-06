@@ -893,13 +893,17 @@ async def _users_service() -> AsyncIterator[DashboardUsersService]:
 
 
 async def _owned_key(client: AsyncClient, owner_id: str, *, active: bool = True, reason: str | None = None) -> ApiKey:
-    """A proxy key belonging to that account. Ownership is set directly: no route assigns it."""
+    """A legacy owned key with its migrated Default-team membership."""
 
     created = await client.post("/api/api-keys", json={"name": f"key-{uuid.uuid4().hex[:6]}"})
     assert created.status_code == 200, created.text
     async with SessionLocal() as session:
         key = await session.get(ApiKey, created.json()["id"])
         assert key is not None
+        from app.db.models import TeamMember
+
+        if await session.get(TeamMember, (key.team_id, owner_id)) is None:
+            session.add(TeamMember(team_id=key.team_id, user_id=owner_id))
         key.owner_user_id = owner_id
         key.is_active = active
         key.deactivated_reason = reason

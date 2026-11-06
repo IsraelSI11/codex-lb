@@ -4,7 +4,7 @@ import json
 import secrets
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from math import ceil
@@ -293,11 +293,17 @@ class ApiKeyCreateData:
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     assigned_source_ids: list[str] | None = None
+    team_id: str = "default"
+    owner_user_id: str | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyUpdateData:
+    team_id: str | None = None
+    team_id_set: bool = False
+    owner_user_id: str | None = None
+    owner_user_id_set: bool = False
     name: str | None = None
     name_set: bool = False
     allowed_models: list[str] | None = None
@@ -359,6 +365,9 @@ class ApiKeyData:
     assigned_account_ids: list[str] = field(default_factory=list)
     assigned_source_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
+    team_id: str = "default"
+    owner_user_id: str | None = None
+    attribution_locked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,6 +514,8 @@ class ApiKeysService:
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
             name=_normalize_name(payload.name),
+            team_id=payload.team_id,
+            owner_user_id=payload.owner_user_id,
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
@@ -876,14 +887,14 @@ class ApiKeysService:
         refreshed = _ensure_valid_api_key_row(await self._repository.get_by_hash(key_hash)) if limits_reset else row
         if refreshed.expires_at is not None and refreshed.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
-        return _to_api_key_data(refreshed)
+        return _to_effective_api_key_data(refreshed)
 
     async def get_key_by_id(self, key_id: str) -> ApiKeyData:
         now = utcnow()
         row = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
         if row.expires_at is not None and row.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
-        return _to_api_key_data(row)
+        return _to_effective_api_key_data(row)
 
     async def enforce_limits_for_request(
         self,
@@ -927,7 +938,9 @@ class ApiKeysService:
             row = _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(key_id))
             if row.expires_at is not None and row.expires_at < now:
                 raise ApiKeyInvalidError("API key has expired")
-            limits_reset = await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
+            limits_reset = await _lazy_reset_expired_limits(
+                self._repository, (row.limits + (row.team.limits if row.team is not None else [])), now=now
+            )
             refreshed = (
                 _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(key_id))
                 if limits_reset
@@ -936,11 +949,15 @@ class ApiKeysService:
             if refreshed.expires_at is not None and refreshed.expires_at < now:
                 raise ApiKeyInvalidError("API key has expired")
 
+            refreshed.attribution_locked = True
             reservation_items: list[UsageReservationItemData] = []
             reservation_id: str | None = None
             normalized_usage_budget = _normalize_request_usage_budget(request_usage_budget)
             try:
-                for limit in refreshed.limits:
+                for limit in sorted(
+                    refreshed.limits + (refreshed.team.limits if refreshed.team is not None else []),
+                    key=lambda item: item.id,
+                ):
                     if not _limit_applies_for_request(limit, request_model=request_model):
                         continue
                     if limit.current_value >= limit.max_value:
@@ -969,31 +986,10 @@ class ApiKeysService:
                     )
 
                 if not reservation_items:
-                    # No configured limit applies to this request, so there is
-                    # nothing to reserve and nothing to settle. Skip the empty
-                    # reservation INSERT and its full-durability commit (the
-                    # lazy expired-limit reset above commits inside
-                    # ``reset_limit`` itself, so no write is pending here).
-                    # Every downstream consumer treats a missing reservation
-                    # as "nothing to settle". Commit to close the implicit
-                    # transaction opened by the admission SELECTs: on sessions
-                    # that outlive this call (e.g. the quota-planner warmup
-                    # service) an open transaction would otherwise idle across
-                    # the upstream round-trip until the next commit. This must
-                    # be ``commit()`` rather than ``rollback()``:
-                    # ``AsyncSession.rollback()`` expires every tracked ORM
-                    # object regardless of ``expire_on_commit``, and the warmup
-                    # service shares this session with already-loaded
-                    # ``account``/``decision`` rows whose attribute access
-                    # after expiry raises ``MissingGreenlet``. ``commit()``
-                    # with ``expire_on_commit=False`` (app/db/session.py)
-                    # leaves tracked state loaded, and is semantically
-                    # equivalent here because the transaction holds only the
-                    # admission SELECTs — no reservation write ran, and every
-                    # production caller either dedicates a session to
-                    # admission (proxy paths) or commits each prior write
-                    # inside its repository methods (quota-planner), so no
-                    # unrelated dirty state can be flushed by this commit.
+                    # No applicable rules: persist the one-shot attribution
+                    # marker and close the transaction without creating an
+                    # empty reservation. Commit preserves loaded ORM state for
+                    # warmup callers that share this session with account rows.
                     await self._repository.commit()
                 else:
                     reservation_id = _next_usage_reservation_id()
@@ -1719,7 +1715,8 @@ async def _lazy_reset_expired_limits(
 
 def _rate_limit_exceeded_error(limit: ApiKeyLimit) -> ApiKeyRateLimitExceededError:
     return ApiKeyRateLimitExceededError(
-        message=f"API key {limit.limit_type.value} {limit.limit_window.value} limit exceeded"
+        message=f"{'Team' if limit.team_id is not None else 'API key'} "
+        f"{limit.limit_type.value} {limit.limit_window.value} limit exceeded; resets at {limit.reset_at.isoformat()}"
         + (f" for model {limit.model_filter}" if limit.model_filter else ""),
         reset_at=limit.reset_at,
     )
@@ -1864,6 +1861,9 @@ def _next_usage_reservation_id() -> str:
 def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
     return ApiKeyCreatedData(
         id=data.id,
+        attribution_locked=data.attribution_locked,
+        team_id=data.team_id,
+        owner_user_id=data.owner_user_id,
         name=data.name,
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
@@ -1901,6 +1901,9 @@ def _to_api_key_data(
     source_assignments = getattr(row, "source_assignments", [])
     return ApiKeyData(
         id=row.id,
+        attribution_locked=bool(row.attribution_locked),
+        team_id=row.team_id or "default",
+        owner_user_id=row.owner_user_id,
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
@@ -2121,3 +2124,27 @@ def _build_api_key_trends(
         tokens_points.append(ApiKeyTrendsPoint(t=dt, v=float(tokens_by_bucket.get(epoch, 0))))
 
     return ApiKeyTrendsData(key_id=key_id, cost=cost_points, tokens=tokens_points)
+
+
+def _to_effective_api_key_data(row: ApiKey) -> ApiKeyData:
+    data = _to_api_key_data(row)
+    team = row.team
+    if team is not None:
+        from app.modules.teams.scope import resolve_effective_scope
+
+        accounts = resolve_effective_scope(
+            json.loads(team.assigned_account_ids) if team.assigned_account_ids is not None else None,
+            data.assigned_account_ids if data.account_assignment_scope_enabled else None,
+        )
+        sources = resolve_effective_scope(
+            json.loads(team.assigned_source_ids) if team.assigned_source_ids is not None else None,
+            data.assigned_source_ids if data.source_assignment_scope_enabled else None,
+        )
+        data = replace(
+            data,
+            assigned_account_ids=sorted(accounts or ()),
+            account_assignment_scope_enabled=accounts is not None,
+            assigned_source_ids=sorted(sources or ()),
+            source_assignment_scope_enabled=sources is not None,
+        )
+    return data

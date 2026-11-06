@@ -130,6 +130,10 @@ async def _owned_key(client: AsyncClient, owner_id: str, *, active: bool = True,
     async with SessionLocal() as session:
         key = await session.get(ApiKey, created.json()["id"])
         assert key is not None
+        from app.db.models import TeamMember
+
+        if await session.get(TeamMember, (key.team_id, owner_id)) is None:
+            session.add(TeamMember(team_id=key.team_id, user_id=owner_id))
         key.owner_user_id = owner_id
         key.is_active = active
         key.deactivated_reason = reason
@@ -729,7 +733,7 @@ async def test_disable_cascades_owned_keys_and_reactivate_restores_only_those(
 
 
 @pytest.mark.asyncio
-async def test_delete_keeps_keys_inactive_without_an_owner(async_client: AsyncClient, app_instance) -> None:
+async def test_delete_retains_referenced_developer_and_key_attribution(async_client: AsyncClient, app_instance) -> None:
     await _setup_admin(async_client)
     created = await _create(async_client, "bob", role_id=OPERATOR_ROLE)
     user_id = created["user"]["id"]
@@ -737,18 +741,12 @@ async def test_delete_keeps_keys_inactive_without_an_owner(async_client: AsyncCl
         await _accept(bob, created["invite"]["token"])
         key = await _owned_key(async_client, user_id)
         deleted = await async_client.delete(f"{USERS}/{user_id}")
-        assert deleted.status_code == 204
-        assert (await bob.get("/api/dashboard-auth/me")).status_code == 401
-    assert await _user(user_id) is None
-    orphan = await _key(key.id)
-    assert orphan.owner_user_id is None and orphan.is_active is False
-    assert orphan.deactivated_reason == "owner_disabled"
-    (row,) = await _rows("user_deleted")
-    assert row.actor_username == "admin" and '"username": "bob"' in (row.details or "")
-    async with SessionLocal() as session:
-        assert (
-            await session.execute(select(DashboardUserInvite).where(DashboardUserInvite.user_id == user_id))
-        ).first() is None
+        assert deleted.status_code == 409
+        assert (await bob.get("/api/dashboard-auth/me")).status_code == 200
+    assert await _user(user_id) is not None
+    retained = await _key(key.id)
+    assert retained.owner_user_id == user_id and retained.is_active is True
+    assert await _rows("user_deleted") == []
 
 
 @pytest.mark.asyncio
@@ -1085,8 +1083,8 @@ async def test_key_patch_that_also_renames_orders_the_owner_before_the_key(
         if patched.status_code == 409:
             assert _error(patched) == "owner_disabled"
         await _owner_and_keys_consistent(user_id, [key.id])
-        # The delete path clears ``owner_user_id`` on every owned key, active or
-        # not, so it is the one that would meet the racing rename head-on.
+        # Deletion must retain referenced developers even when a key rename
+        # and reactivation are admitted concurrently.
         second = await _create(async_client, f"erin{round_number}", role_id=OPERATOR_ROLE)
         async with _client(app_instance) as erin:
             await _accept(erin, second["invite"]["token"])
@@ -1095,22 +1093,12 @@ async def test_key_patch_that_also_renames_orders_the_owner_before_the_key(
             async_client.delete(f"{USERS}/{second['user']['id']}"),
             async_client.patch(f"/api/api-keys/{doomed.id}", json={"isActive": True, "name": f"doomed-{round_number}"}),
         )
-        assert deleted.status_code == 204, deleted.text
-        assert patched.status_code in (200, 409), patched.text
-        # End state, not only status codes: the owner row is gone and the key
-        # has been released from it. A 409 means the reactivation read the
-        # owner row first and the key stays parked. A 200 is one of two serial
-        # orders: the DELETE committed first and the reactivation then found
-        # an ownerless key (active), or the reactivation committed first and
-        # the delete cascade parked the key again (inactive, owner reason).
-        assert await _user(second["user"]["id"]) is None
+        assert deleted.status_code == 409, deleted.text
+        assert patched.status_code == 200, patched.text
+        assert await _user(second["user"]["id"]) is not None
         row = await _key(doomed.id)
-        assert row.owner_user_id is None
-        if patched.status_code == 409:
-            assert _error(patched) == "owner_disabled"
-            assert not row.is_active and row.deactivated_reason == "owner_disabled"
-        else:
-            assert row.is_active or row.deactivated_reason == "owner_disabled"
+        assert row.owner_user_id == second["user"]["id"]
+        assert row.is_active
 
 
 @pytest.mark.asyncio

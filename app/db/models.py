@@ -1727,6 +1727,27 @@ class ApiFirewallAllowlist(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    assigned_account_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assigned_source_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    limits: Mapped[list["ApiKeyLimit"]] = relationship("ApiKeyLimit", lazy="selectin", cascade="all, delete-orphan")
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    team_id: Mapped[str] = mapped_column(String, ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("dashboard_users.id", ondelete="RESTRICT"), primary_key=True
+    )
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
     __table_args__ = (
@@ -1737,6 +1758,11 @@ class ApiKey(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    team_id: Mapped[str] = mapped_column(
+        String, ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False, default="default", server_default="default"
+    )
+    team: Mapped["Team"] = relationship("Team", lazy="selectin")
+    attribution_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     name: Mapped[str] = mapped_column(String, nullable=False)
     key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
@@ -1784,7 +1810,7 @@ class ApiKey(Base):
     # once principals carry a user id; declared here so the schema lands once.
     owner_user_id: Mapped[str | None] = mapped_column(
         String,
-        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        ForeignKey("dashboard_users.id", ondelete="RESTRICT"),
         nullable=True,
     )
     created_by_user_id: Mapped[str | None] = mapped_column(
@@ -1978,11 +2004,21 @@ class LimitWindow(str, Enum):
 class ApiKeyLimit(Base):
     __tablename__ = "api_key_limits"
 
+    __table_args__ = (
+        CheckConstraint(
+            "(api_key_id IS NOT NULL AND team_id IS NULL) OR (api_key_id IS NULL AND team_id IS NOT NULL)",
+            name="ck_limit_one_owner",
+        ),
+    )
+
+    team_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("teams.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    api_key_id: Mapped[str] = mapped_column(
+    api_key_id: Mapped[str | None] = mapped_column(
         String,
         ForeignKey("api_keys.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
     limit_type: Mapped[LimitType] = mapped_column(
         SqlEnum(

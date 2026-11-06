@@ -25,6 +25,8 @@ class LimitRuleResponse(DashboardModel):
 
 
 class ApiKeyCreateRequest(DashboardModel):
+    team_id: str = "default"
+    owner_user_id: str | None = None
     name: str = Field(min_length=1, max_length=128)
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool = False
@@ -46,6 +48,8 @@ class ApiKeyCreateRequest(DashboardModel):
 
 
 class ApiKeyUpdateRequest(DashboardModel):
+    team_id: str | None = None
+    owner_user_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=128)
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool | None = None
@@ -76,6 +80,9 @@ class ApiKeyUsageSummaryResponse(DashboardModel):
 
 
 class ApiKeyResponse(DashboardModel):
+    attribution_locked: bool = False
+    team_id: str = "default"
+    owner_user_id: str | None = None
     id: str
     name: str
     key_prefix: str

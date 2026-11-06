@@ -285,15 +285,17 @@ async def test_identity_uniqueness_and_api_key_ownership_columns(db_setup) -> No
         stored = (await session.execute(select(ApiKey).where(ApiKey.id == key_id))).scalar_one()
         assert stored.owner_user_id == user_id
         assert stored.deactivated_reason is None
-        # Deleting the owner detaches the key (SET NULL) and cascades identities.
+        # Referenced developer identity is retained for permanent key rollups.
         owner = (await session.execute(select(DashboardUser).where(DashboardUser.id == user_id))).scalar_one()
         await session.delete(owner)
-        await session.commit()
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
     async with SessionLocal() as session:
         stored = (await session.execute(select(ApiKey).where(ApiKey.id == key_id))).scalar_one()
-        assert stored.owner_user_id is None
+        assert stored.owner_user_id == user_id
         identities = (await session.execute(select(DashboardIdentity))).scalars().all()
-        assert identities == []
+        assert len(identities) == 1 and identities[0].user_id == user_id
 
 
 @pytest.mark.parametrize("legacy_password_configured", [True, False])

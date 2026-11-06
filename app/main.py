@@ -143,6 +143,7 @@ from app.modules.sticky_sessions.cleanup_scheduler import (
     build_sticky_session_cleanup_scheduler,
     operation_retention_metrics_enabled,
 )
+from app.modules.teams import api as teams_api
 from app.modules.telemetry import api as telemetry_api
 from app.modules.telemetry.scheduler import build_telemetry_scheduler
 from app.modules.usage import api as usage_api
@@ -1066,6 +1067,7 @@ def create_app() -> FastAPI:
     app.include_router(cache_isolation_probe_api.router)
     app.include_router(automations_api.router)
     app.include_router(api_keys_api.router)
+    app.include_router(teams_api.router)
     app.include_router(model_sources_api.router)
     app.include_router(health_api.router)
 

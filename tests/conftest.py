@@ -132,6 +132,7 @@ def _recreate_test_schema(sync_conn) -> None:
     _drop_test_migration_tables(sync_conn)
     Base.metadata.drop_all(sync_conn)
     Base.metadata.create_all(sync_conn)
+    sync_conn.execute(text("INSERT INTO teams (id, name) VALUES ('default', 'Default')"))
     # Production seeds these through the migration and at startup; the test
     # schema is built with create_all, so seed the preset role rows here too.
     seed_preset_dashboard_roles(sync_conn)

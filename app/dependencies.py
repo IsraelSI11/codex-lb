@@ -55,6 +55,8 @@ from app.modules.scim.service import ScimUsersService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
+from app.modules.teams.repository import TeamsRepository
+from app.modules.teams.service import TeamsService
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
 
@@ -460,3 +462,15 @@ def get_automations_context(
 
 async def get_reports_caches(request: Request) -> ReportsCaches:
     return request.app.state.reports_caches
+
+
+@dataclass(slots=True)
+class TeamsContext:
+    session: AsyncSession
+    repository: TeamsRepository
+    service: TeamsService
+
+
+def get_teams_context(session: AsyncSession = Depends(get_session)) -> TeamsContext:
+    repository = TeamsRepository(session)
+    return TeamsContext(session=session, repository=repository, service=TeamsService(repository))
