@@ -310,3 +310,9 @@ describe("ApiDetail", () => {
 		expect(screen.getByRole("switch")).toBeChecked();
 	});
 });
+
+it("retains a used key while allowing deactivation", () => {
+  renderApiDetail({ apiKey: createApiKey({ attributionLocked: true }) });
+  expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Disable" })).toBeEnabled();
+});

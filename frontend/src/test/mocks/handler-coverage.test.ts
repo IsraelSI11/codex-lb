@@ -20,6 +20,9 @@ function extractHandlerPaths(): string[] {
 // All API endpoints consumed by the frontend (method + MSW path pattern).
 // Parameterized segments use MSW `:param` syntax.
 const EXPECTED_ENDPOINTS = [
+  "GET /api/teams/",
+  "GET /api/teams/developers",
+  "GET /api/teams/usage",
 	// health
 	"GET /health",
 	"GET /health/ready",

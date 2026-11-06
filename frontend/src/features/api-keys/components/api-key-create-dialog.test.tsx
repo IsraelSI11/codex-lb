@@ -11,6 +11,12 @@ import { renderWithProviders } from "@/test/utils";
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
 
 describe("ApiKeyCreateDialog", () => {
+  it("defaults to Default with an optional shared developer", async () => {
+    renderWithProviders(<ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={vi.fn()} />);
+    expect(await screen.findByLabelText("Team")).toHaveValue("default");
+    expect(screen.getByLabelText("Developer")).toHaveValue("");
+  });
+
   it("labels the reasoning effort trigger with its field and state", () => {
     renderWithProviders(
       <ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={vi.fn()} />,

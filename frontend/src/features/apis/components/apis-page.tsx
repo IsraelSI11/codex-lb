@@ -1,3 +1,4 @@
+import { TeamsPanel } from "@/features/teams/teams-panel";
 import { ShieldCheck } from "lucide-react";
 import { lazy, Suspense, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -170,6 +171,7 @@ export function ApisPage() {
 			) : (
 				<div className="space-y-6">
 					<ApiKeysOverview apiKeys={apiKeys} />
+                    <TeamsPanel canWrite={canWrite} />
 
 					<div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
 						<div className="rounded-xl border bg-card p-4">

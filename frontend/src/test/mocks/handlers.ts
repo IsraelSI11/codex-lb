@@ -898,6 +898,10 @@ function listFilteredAutomationRuns(url: URL) {
 }
 
 export const handlers = [
+  http.get("/api/teams/", () => HttpResponse.json([{ id: "default", name: "Default", assignedAccountIds: null, assignedSourceIds: null, memberUserIds: [], limits: [] }])),
+  http.get("/api/teams/developers", () => HttpResponse.json([])),
+  http.get("/api/teams/usage", ({ request }) => { const url = new URL(request.url); return HttpResponse.json({ start: url.searchParams.get("start"), end: url.searchParams.get("end"), teams: [], developers: [], breakdown: [], unassigned: [] }); }),
+
   http.get("/health", () => {
     return HttpResponse.json({ status: "ok" });
   }),

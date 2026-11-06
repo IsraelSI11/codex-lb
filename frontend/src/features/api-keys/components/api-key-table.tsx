@@ -162,7 +162,7 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
                       {t("common.actions.regenerate")}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onClick={() => onDelete(apiKey)}>
+                    <DropdownMenuItem variant="destructive" disabled={apiKey.attributionLocked} onClick={() => onDelete(apiKey)}>
                       <Trash2 className="size-4" />
                       {t("common.actions.delete")}
                     </DropdownMenuItem>

@@ -42,6 +42,9 @@ export type ReasoningEffortType = (typeof REASONING_EFFORTS)[number];
 export const ENFORCED_REASONING_EFFORTS = ["none", ...REASONING_EFFORTS] as const;
 
 export const ApiKeySchema = z.object({
+  attributionLocked: z.boolean().optional(),
+  teamId: z.string().optional(),
+  ownerUserId: z.string().nullable().optional(),
   id: z.string(),
   name: z.string(),
   keyPrefix: z.string(),
@@ -83,6 +86,8 @@ export const USAGE_SECTION_LABELS: Record<UsageSection, string> = {
 };
 
 export const ApiKeyCreateRequestSchema = z.object({
+  teamId: z.string().optional(),
+  ownerUserId: z.string().nullable().optional(),
   name: z.string().min(1).max(128),
   allowedModels: z.array(z.string()).optional(),
   applyToCodexModel: z.boolean().optional(),
@@ -108,6 +113,8 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
 });
 
 export const ApiKeyUpdateRequestSchema = z.object({
+  teamId: z.string().optional(),
+  ownerUserId: z.string().nullable().optional(),
   name: z.string().min(1).max(128).optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   applyToCodexModel: z.boolean().optional(),

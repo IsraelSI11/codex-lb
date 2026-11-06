@@ -1,3 +1,4 @@
+import { KeyAttribution } from "@/features/teams/key-attribution";
 import { useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -64,6 +65,8 @@ type ApiKeyCreateFormProps = {
 };
 
 type ApiKeyCreateDraft = {
+  teamId: string;
+  ownerUserId: string | null;
   selectedModels: string[];
   selectedAccountIds: string[];
   selectedSourceIds: string[];
@@ -80,6 +83,8 @@ type ApiKeyCreateDraft = {
 };
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
+  teamId: "default",
+  ownerUserId: null,
   selectedModels: [],
   selectedAccountIds: [],
   selectedSourceIds: [],
@@ -118,6 +123,8 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
     const validLimits = draft.limitRules.filter((rule) => rule.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
+      teamId: draft.teamId,
+      ownerUserId: draft.ownerUserId,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
@@ -157,6 +164,8 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
           <div className="grid gap-x-6 sm:grid-cols-2">
             <div className="space-y-3 pl-1 pr-2">
               <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.general")}</h4>
+
+            <KeyAttribution teamId={draft.teamId} ownerUserId={draft.ownerUserId} onChange={(teamId, ownerUserId) => updateDraft({ teamId, ownerUserId })} />
 
             <FormField
               control={form.control}

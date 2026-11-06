@@ -18,6 +18,8 @@ import {
   unauthenticatedSession,
 } from "./fixtures";
 import {
+  createApiKeyTrends,
+  createApiKeyUsage7Day,
   createAccountSummary,
   createConversationDetails,
   createConversationEntry,
@@ -62,8 +64,49 @@ async function interceptApi(
     const url = new URL(route.request().url());
     const p = url.pathname;
 
+    if (p === "/api/teams/")
+      return fulfill(route, [
+        {
+          id: "default",
+          name: "Default",
+          assignedAccountIds: null,
+          assignedSourceIds: null,
+          memberUserIds: ["ana"],
+          limits: [
+            {
+              id: 100,
+              limitType: "total_tokens",
+              limitWindow: "weekly",
+              maxValue: 1000000,
+              currentValue: 350000,
+              modelFilter: null,
+              resetAt: new Date(Date.now() + 86400000).toISOString(),
+            },
+          ],
+        },
+      ]);
+    if (p === "/api/teams/developers")
+      return fulfill(route, [{ id: "ana", name: "Ana", status: "active" }]);
+    if (p === "/api/teams/usage") {
+      const total = {
+        teamId: "default",
+        ownerUserId: "ana",
+        requestCount: 240,
+        totalTokens: 350000,
+        cachedInputTokens: 70000,
+        totalCostUsd: 4.25,
+      };
+      return fulfill(route, {
+        start: url.searchParams.get("start"),
+        end: url.searchParams.get("end"),
+        teams: [{ ...total, ownerUserId: null }],
+        developers: [{ ...total, teamId: null }],
+        breakdown: [total],
+        unassigned: [],
+      });
+    }
     if (p === "/api/dashboard-auth/session") return fulfill(route, session);
-    if (p === "/api/dashboard/overview") return fulfill(route, overview);
+    if (p === "/api/dashboard/overview") return fulfill(route, { ...overview, lastSyncAt: new Date().toISOString() });
     if (p === "/api/request-logs/options") return fulfill(route, filterOptions);
     if (p === "/api/request-logs") {
       const limit = Math.max(1, Number(url.searchParams.get("limit") ?? 50));
@@ -102,13 +145,18 @@ async function interceptApi(
     if (resetCreditsMatch) {
       return fulfill(route, resetCreditSnapshots[decodeURIComponent(resetCreditsMatch[1])] ?? null);
     }
+    if (/^\/api\/api-keys\/[^/]+\/trends$/.test(p))
+      return fulfill(route, createApiKeyTrends(p.split("/")[3]));
+    if (/^\/api\/api-keys\/[^/]+\/usage-7d$/.test(p))
+      return fulfill(route, createApiKeyUsage7Day(p.split("/")[3]));
+    if (p === "/api/model-sources/") return fulfill(route, { sources: [] });
     if (p === "/api/models") return fulfill(route, { models });
-    if (p === "/api/api-keys" || p === "/api/api-keys/") return fulfill(route, apiKeys);
+    if (p === "/api/api-keys" || p === "/api/api-keys/") return fulfill(route, apiKeys.map((key) => ({ ...key, expiresAt: new Date(Date.now() + 90 * 86400000).toISOString(), teamId: "default", ownerUserId: null, attributionLocked: true })));
 
     return route.abort();
   });
 
-  await page.route("**/health", (route) => fulfill(route, { status: "ok" }));
+  await page.route("**/health{,/ready}", (route) => fulfill(route, { status: "ok" }));
 }
 
 // ── Theme ──
@@ -385,4 +433,59 @@ test("login", async ({ page }) => {
     session: unauthenticatedSession,
     waitFor: 'input[type="password"]',
   });
+});
+
+test("team-consumption evidence", async ({ page }) => {
+  await interceptApi(page);
+  await page.addInitScript(() =>
+    localStorage.setItem("codex-lb-theme", "light"),
+  );
+  await page.goto(`${BASE_URL}/dashboard`);
+  await page.getByRole("link", { name: "APIs", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "APIs", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Loading 7-day usage...")).toHaveCount(0, {
+    timeout: 10000,
+  });
+  await page.evaluate(() => {
+    for (const element of document.querySelectorAll<HTMLElement>(
+      "header, footer",
+    ))
+      element.style.position = "relative";
+  });
+  await page.screenshot({
+    path: `../.local/team-consumption-${process.env.TEAM_SCREENSHOT_STAGE ?? "before"}-desktop.png`,
+    fullPage: true,
+  });
+  if (process.env.TEAM_SCREENSHOT_STAGE === "after") {
+    await page
+      .getByText("Team members · Eligible resources · Shared budgets")
+      .click();
+    await page
+      .getByRole("region", { name: "Teams and consumption" })
+      .screenshot({
+        path: "../.local/team-consumption-after-admin.png",
+      });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  if (process.env.TEAM_SCREENSHOT_STAGE === "after") {
+    await page
+      .getByRole("region", { name: "Teams and consumption" })
+      .screenshot({ path: "../.local/team-consumption-after-mobile.png" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page
+      .getByRole("button", { name: "Create API Key", exact: true })
+      .click();
+    await expect(page.getByLabel("Team", { exact: true }).last()).toBeVisible();
+    await expect(page.getByRole("button", { name: "All model sources", exact: true })).toBeVisible();
+    await page.screenshot({
+      path: "../.local/team-consumption-after-key-dialog.png",
+    });
+  } else {
+    await page.screenshot({
+      path: `../.local/team-consumption-${process.env.TEAM_SCREENSHOT_STAGE ?? "before"}-mobile.png`,
+      fullPage: true,
+    });
+  }
 });

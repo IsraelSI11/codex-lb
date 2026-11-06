@@ -1,3 +1,4 @@
+import { KeyAttribution } from "@/features/teams/key-attribution";
 import { useMemo, useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -91,6 +92,8 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
 }
 
 type ApiKeyEditDraft = {
+  teamId: string;
+  ownerUserId: string | null;
   selectedModels: string[];
   selectedAccountIds: string[];
   selectedSourceIds: string[];
@@ -109,6 +112,8 @@ type ApiKeyEditDraft = {
 
 function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
+    teamId: apiKey.teamId ?? "default",
+    ownerUserId: apiKey.ownerUserId ?? null,
     selectedModels: apiKey.allowedModels || [],
     selectedAccountIds: apiKey.assignedAccountIds,
     selectedSourceIds: apiKey.assignedSourceIds,
@@ -166,6 +171,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       (apiKey.sourceAssignmentScopeEnabled && draft.selectedSourceIds.length === 0 && draft.clearSourceScope);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
+      teamId: draft.teamId,
+      ownerUserId: draft.ownerUserId,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
@@ -206,6 +213,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
           {/* Left column — General */}
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2">
             <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.general")}</h4>
+
+            <KeyAttribution teamId={draft.teamId} ownerUserId={draft.ownerUserId} onChange={(teamId, ownerUserId) => updateDraft({ teamId, ownerUserId })} readOnly={Boolean(apiKey.attributionLocked || apiKey.lastUsedAt || apiKey.usageSummary?.requestCount)} />
 
             <FormField
               control={form.control}

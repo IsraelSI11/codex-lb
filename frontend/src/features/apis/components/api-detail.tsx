@@ -261,7 +261,8 @@ export function ApiDetail({
 					variant="destructive"
 					className="h-8 gap-1.5 text-xs"
 					onClick={() => onDelete(apiKey)}
-					disabled={busy}
+					disabled={busy || apiKey.attributionLocked}
+                    title={apiKey.attributionLocked ? t("teams.immutable") : undefined}
 				>
 					<Trash2 className="h-3.5 w-3.5" />
 					{t("common.actions.delete")}
