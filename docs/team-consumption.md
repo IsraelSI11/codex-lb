@@ -26,9 +26,19 @@ current usage, capacity, and reset time. Resetting a budget starts a new counter
 period without repricing or changing usage reports. Already admitted streams
 finish under the existing reservation policy.
 
-Used key attribution is fixed. Deactivate a used key and create a replacement to
-change its team or developer. Deactivate a developer's active team keys before
-removing membership; reactivation requires current membership. Disable referenced
+Edit a key to change its team or developer, including after it has been used.
+The same API key remains valid and individual limits/counters are preserved.
+The change applies to future admissions: historical consumption stays with its
+original team/developer, and requests already in flight finish against their
+original team budgets. The selected developer must belong to the destination
+team; choose a member or explicitly select shared usage. A request racing the
+edit may receive `api_key_attribution_changed` (409); retry it with fresh policy.
+This also applies to internal forwarding rejected before upstream execution;
+the origin releases its original reservation. Upgrade all forwarding instances
+together during a maintenance stop; mixed old/new attribution protocols are
+not supported for keyed forwards.
+Deactivate or reassign a developer's active team keys before removing membership;
+reactivation requires current membership. Disable historically referenced
 developer accounts rather than deleting them, so historical usage stays visible.
 
 Consumption filters select a UTC date range (end date excluded), team, and

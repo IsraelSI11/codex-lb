@@ -279,3 +279,51 @@ async def test_team_rule_removal_in_flight_keeps_key_settlement_exactly_once(asy
             )
     rows = (await async_client.get("/api/api-keys/")).json()
     assert next(row for row in rows if row["id"] == keys[0]["id"])["limits"][0]["currentValue"] == 25
+
+
+async def test_reassignment_preserves_inflight_and_individual_counters(async_client):
+    from sqlalchemy import select
+
+    from app.db.models import ApiKey, ApiKeyAttribution, ApiKeyLimit
+
+    old, keys = await _setup_budget(async_client, 100, 100)
+    key = keys[0]
+    destination = (await async_client.post("/api/teams/", json={"name": "Destination"})).json()
+    await async_client.patch(
+        "/api/teams/" + destination["id"],
+        json={"limits": [{"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 100}]},
+    )
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        before = await service.validate_key(key["key"])
+        original = await session.get(ApiKey, key["id"])
+        assert original is not None
+        identity = (original.key_hash, original.key_prefix)
+        reservation = await service.enforce_limits_for_request(
+            key["id"],
+            request_model="gpt-5.1",
+            expected_attribution_id=before.attribution_id,
+            request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=10, output_tokens=0),
+        )
+        assert reservation is not None
+    moved = await async_client.patch("/api/api-keys/" + key["id"], json={"teamId": destination["id"]})
+    assert moved.status_code == 200
+    assert moved.json()["limits"][0]["currentValue"] == 10
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        current = await service.validate_key(key["key"])
+        assert current.id == before.id
+        original = await session.get(ApiKey, key["id"])
+        assert original is not None
+        assert (original.key_hash, original.key_prefix) == identity
+        await service.finalize_usage_reservation(
+            reservation.reservation_id, model="gpt-5.1", input_tokens=3, output_tokens=0
+        )
+        limits = (await session.scalars(select(ApiKeyLimit))).all()
+        assert next(rule for rule in limits if rule.team_id == old["id"]).current_value == 3
+        assert next(rule for rule in limits if rule.team_id == destination["id"]).current_value == 0
+        assert next(rule for rule in limits if rule.api_key_id == key["id"]).current_value == 3
+        snapshots = (
+            await session.scalars(select(ApiKeyAttribution).where(ApiKeyAttribution.api_key_id == key["id"]))
+        ).all()
+        assert {row.team_id for row in snapshots} == {old["id"], destination["id"]}

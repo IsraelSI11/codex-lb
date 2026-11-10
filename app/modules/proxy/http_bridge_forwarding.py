@@ -51,6 +51,7 @@ HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
 HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER = "x-codex-bridge-origin-instance"
 HTTP_BRIDGE_TARGET_INSTANCE_HEADER = "x-codex-bridge-target-instance"
 HTTP_BRIDGE_CODEX_AFFINITY_HEADER = "x-codex-bridge-codex-session-affinity"
+HTTP_BRIDGE_ATTRIBUTION_HEADER = "x-codex-bridge-key-attribution"
 HTTP_BRIDGE_RESERVATION_ID_HEADER = "x-codex-bridge-reservation-id"
 HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
 HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
@@ -96,6 +97,7 @@ class HTTPBridgeForwardContext:
     original_affinity_key: str | None = None
     file_owner_account_id: str | None = None
     client_ip: str | None = None
+    api_key_attribution_id: str | None = None
     reservation: ApiKeyUsageReservationData | None = None
     signature_version: str | None = None
 
@@ -160,6 +162,7 @@ def _validate_bridge_forward_context_headers(context: HTTPBridgeForwardContext) 
         (HTTP_BRIDGE_AFFINITY_KEY_HEADER, context.original_affinity_key),
         (HTTP_BRIDGE_FILE_OWNER_HEADER, context.file_owner_account_id),
         (HTTP_BRIDGE_CLIENT_IP_HEADER, context.client_ip),
+        (HTTP_BRIDGE_ATTRIBUTION_HEADER, context.api_key_attribution_id),
     ):
         _reject_illegal_bridge_header_value(name, value)
     if context.reservation is None:
@@ -350,6 +353,8 @@ def build_owner_forward_headers(
         )
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
+    if context.api_key_attribution_id is not None:
+        forwarded[HTTP_BRIDGE_ATTRIBUTION_HEADER] = context.api_key_attribution_id
     if context.reservation is not None:
         forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = context.reservation.reservation_id
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
@@ -425,6 +430,7 @@ def parse_forwarded_request(
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
         file_owner_account_id=_optional_header(headers.get(HTTP_BRIDGE_FILE_OWNER_HEADER)),
         client_ip=client_ip,
+        api_key_attribution_id=_optional_header(headers.get(HTTP_BRIDGE_ATTRIBUTION_HEADER)),
         reservation=_reservation_from_headers(headers),
         signature_version=signature_version,
     )
@@ -492,6 +498,8 @@ def parse_forwarded_request(
     signature_valid = primary_signature_valid or (
         signature_without_client_ip_valid and (client_ip is None or client_ip_signature_valid)
     )
+    if context.api_key_attribution_id is not None:
+        return None, _invalid_bridge_forward_signature_error()
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
     return HTTPBridgeForwardedRequest(context=context), None
@@ -689,6 +697,7 @@ def _structured_bridge_signing_payload(
                 if context.reservation is not None
                 else None
             ),
+            **({"api_key_attribution_id": context.api_key_attribution_id} if context.api_key_attribution_id else {}),
             "signature_version": signature_version,
             "target_instance": context.target_instance,
         },

@@ -2147,7 +2147,7 @@ class _HTTPBridgeMixin(
                     request_id=request_state.request_log_id or request_state.request_id,
                     kind="http_bridge",
                     request_stage="reattach",
-                    api_key=session.api_key,
+                    api_key=request_state.api_key,
                     affinity_policy=selection_affinity or session.affinity,
                     prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),

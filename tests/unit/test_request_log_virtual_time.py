@@ -252,3 +252,24 @@ async def test_stream_preflight_error_latency_uses_owner_clock(monkeypatch: pyte
     (row,) = request_logs.rows
     assert row["latency_ms"] == 2500
     assert row["status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "websocket"])
+async def test_delayed_log_retains_each_turn_assignment(transport: str) -> None:
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    request_logs = _RequestLogsRepo()
+    service = _service(scheduler, request_logs)
+    for assignment in ("team-a", "team-b", "team-a"):
+        key = SimpleNamespace(id="stable-key", attribution_id=assignment)
+        await service._write_request_log(
+            account_id=None,
+            api_key=cast(Any, key),
+            request_id="client-reused-id",
+            model="gpt-5.5",
+            latency_ms=12,
+            status="success",
+            transport=transport,
+        )
+    await scheduler.drain()
+    assert [row["api_key_attribution_id"] for row in request_logs.rows] == ["team-a", "team-b", "team-a"]

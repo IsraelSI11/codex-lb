@@ -20,6 +20,12 @@ export function KeyAttribution({
   const teams = useTeams();
   const developers = useDevelopers();
   const team = teams.data?.find((row) => row.id === teamId);
+  const invalidDeveloper = Boolean(
+    ownerUserId && team && developers.data &&
+    (!team.memberUserIds.includes(ownerUserId) ||
+      !developers.data.some((row) => row.id === ownerUserId && row.status === "active")),
+  );
+  const membershipError = invalidDeveloper ? t("teams.invalidDeveloper") : "";
   return (
     <div className="space-y-3">
       {teams.isError || developers.isError ? (
@@ -34,7 +40,7 @@ export function KeyAttribution({
           className="h-9 w-full rounded-md border bg-background px-3 text-sm"
           disabled={readOnly || teams.isPending}
           value={teamId}
-          onChange={(event) => onChange(event.target.value, null)}
+          onChange={(event) => onChange(event.target.value, ownerUserId)}
         >
           {!teams.data ? (
             <option value={teamId}>
@@ -56,9 +62,15 @@ export function KeyAttribution({
           id={`${id}-developer`}
           className="h-9 w-full rounded-md border bg-background px-3 text-sm"
           disabled={readOnly || developers.isPending}
+          aria-invalid={invalidDeveloper || undefined}
+          aria-describedby={invalidDeveloper ? `${id}-membership-error` : undefined}
+          ref={(element) => { element?.setCustomValidity(membershipError); }}
           value={ownerUserId ?? ""}
           onChange={(event) => onChange(teamId, event.target.value || null)}
         >
+          {ownerUserId && developers.data && !developers.data.some((row) => row.id === ownerUserId) ? (
+            <option value={ownerUserId}>{ownerUserId}</option>
+          ) : null}
           <option value="">{t("teams.shared")}</option>
           {developers.data
             ?.filter(
@@ -74,6 +86,9 @@ export function KeyAttribution({
             ))}
         </select>
       </div>
+      {invalidDeveloper ? (
+        <p id={`${id}-membership-error`} className="text-sm text-destructive">{membershipError}</p>
+      ) : null}
       {readOnly ? (
         <p className="text-xs text-muted-foreground">{t("teams.immutable")}</p>
       ) : null}

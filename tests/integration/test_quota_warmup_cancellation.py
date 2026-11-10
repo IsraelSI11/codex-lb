@@ -29,13 +29,18 @@ async def test_cancelled_warmup_settles_known_usage(
     settlements: list[tuple[str, str, str, int | None, int | None, int | None]] = []
 
     class FakeApiKeys:
+        async def get_key_by_id(self, api_key_id: str) -> SimpleNamespace:
+            return SimpleNamespace(attribution_id="snapshot-known-usage")
+
         async def enforce_limits_for_request(
             self,
             api_key_id: str,
             *,
+            expected_attribution_id: str,
             request_model: str,
             request_usage_budget: ApiKeyRequestUsageBudget,
         ) -> SimpleNamespace:
+            assert expected_attribution_id == "snapshot-known-usage"
             del api_key_id, request_model, request_usage_budget
             return SimpleNamespace(reservation_id="reservation-known-usage")
 

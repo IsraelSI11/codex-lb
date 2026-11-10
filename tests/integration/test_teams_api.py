@@ -58,7 +58,7 @@ async def test_developer_must_be_member(async_client):
     assert response.status_code == 400
 
 
-async def test_memberships_owner_and_immutable_used_key(async_client):
+async def test_memberships_owner_and_reassignable_used_key(async_client):
     from app.db.models import DashboardUser, RequestLog
     from app.db.session import SessionLocal
 
@@ -79,10 +79,10 @@ async def test_memberships_owner_and_immutable_used_key(async_client):
             RequestLog(api_key_id=key["id"], request_id="used", model="gpt-5.1", status="success", latency_ms=1)
         )
         await session.commit()
-    assert (await async_client.patch("/api/api-keys/" + key["id"], json={"teamId": other["id"]})).status_code == 409
+    assert (await async_client.patch("/api/api-keys/" + key["id"], json={"teamId": other["id"]})).status_code == 200
     assert (await async_client.delete("/api/api-keys/" + key["id"])).status_code == 409
     assert (await async_client.patch("/api/api-keys/" + key["id"], json={"isActive": False})).status_code == 200
-    assert (await async_client.delete(f"/api/teams/{team['id']}/members/ana")).status_code == 200
+    assert (await async_client.delete(f"/api/teams/{other['id']}/members/ana")).status_code == 200
     assert (await async_client.patch("/api/api-keys/" + key["id"], json={"isActive": True})).status_code == 400
 
 
@@ -102,7 +102,7 @@ async def test_admission_without_limits_locks_attribution_immediately(async_clie
     rows = (await async_client.get("/api/api-keys/")).json()
     assert rows[0]["attributionLocked"] is True
     team = (await async_client.post("/api/teams/", json={"name": "Other"})).json()
-    assert (await async_client.patch("/api/api-keys/" + key["id"], json={"teamId": team["id"]})).status_code == 409
+    assert (await async_client.patch("/api/api-keys/" + key["id"], json={"teamId": team["id"]})).status_code == 200
 
 
 @pytest.mark.parametrize("path", ["/api/teams", "/api/teams/"])
@@ -140,35 +140,6 @@ async def test_referenced_developer_retained_and_bulk_reactivation_requires_memb
         assert await DashboardUsersRepository(session).reactivate_owner_disabled_keys("retained") == []
     rows = (await async_client.get("/api/api-keys/")).json()
     assert next(row for row in rows if row["id"] == key["id"])["isActive"] is False
-
-
-async def test_admission_racing_attribution_edit_cannot_move_consumption(async_client, monkeypatch):
-    from app.core.exceptions import DashboardConflictError
-    from app.db.session import SessionLocal
-    from app.modules.api_keys.repository import ApiKeysRepository
-    from app.modules.api_keys.service import ApiKeysService
-
-    key = (await async_client.post("/api/api-keys/", json={"name": "race"})).json()
-    team = (await async_client.post("/api/teams/", json={"name": "Destination"})).json()
-    async with SessionLocal() as session:
-        repo = ApiKeysRepository(session)
-        validate = repo.validate_attribution
-
-        async def admit_during_validation(team_id, owner_user_id):
-            await validate(team_id, owner_user_id)
-            async with SessionLocal() as admission:
-                await ApiKeysService(ApiKeysRepository(admission)).enforce_limits_for_request(
-                    key["id"], request_model="gpt-5.1"
-                )
-
-        monkeypatch.setattr(repo, "validate_attribution", admit_during_validation)
-        with pytest.raises(DashboardConflictError):
-            await repo.update_attribution(
-                key["id"], team_id=team["id"], owner_user_id=None, team_set=True, owner_set=False
-            )
-        await session.rollback()
-    rows = (await async_client.get("/api/api-keys/")).json()
-    assert rows[0]["teamId"] == "default"
 
 
 @pytest.mark.parametrize(
@@ -324,3 +295,62 @@ async def test_postgresql_add_waits_for_owner_without_holding_team(async_client,
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_reassignment_rejects_stale_admission_without_reserving(async_client):
+    from app.db.session import SessionLocal
+    from app.modules.api_keys.repository import ApiKeysRepository
+    from app.modules.api_keys.service import ApiKeyAttributionChangedError, ApiKeysService
+
+    key = (await async_client.post("/api/api-keys/", json={"name": "stale"})).json()
+    async with SessionLocal() as session:
+        stale = await ApiKeysService(ApiKeysRepository(session)).get_key_by_id(key["id"])
+    team = (await async_client.post("/api/teams/", json={"name": "New"})).json()
+    await async_client.patch(
+        "/api/teams/" + team["id"],
+        json={"limits": [{"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 100}]},
+    )
+    moved = await async_client.patch("/api/api-keys/" + key["id"], json={"teamId": team["id"]})
+    assert moved.status_code == 200
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        with pytest.raises(ApiKeyAttributionChangedError):
+            await service.enforce_limits_for_request(
+                key["id"], request_model="gpt-5.1", expected_attribution_id=stale.attribution_id
+            )
+        teams = (await async_client.get("/api/teams/")).json()
+        assert next(row for row in teams if row["id"] == team["id"])["limits"][0]["currentValue"] == 0
+        current = await service.validate_key(key["key"])
+        assert current.id == stale.id
+        assert current.attribution_id != stale.attribution_id
+        assert (
+            await service.enforce_limits_for_request(
+                current.id, request_model="gpt-5.1", expected_attribution_id=current.attribution_id
+            )
+            is not None
+        )
+
+
+async def test_unlimited_imported_key_admission_creates_attribution_snapshot(async_client):
+    from sqlalchemy import delete
+
+    from app.db.models import ApiKeyAttribution
+    from app.db.session import SessionLocal
+    from app.modules.api_keys.repository import ApiKeysRepository
+    from app.modules.api_keys.service import ApiKeysService
+
+    key = (await async_client.post("/api/api-keys/", json={"name": "imported"})).json()
+    async with SessionLocal() as session:
+        await session.execute(delete(ApiKeyAttribution).where(ApiKeyAttribution.api_key_id == key["id"]))
+        await session.commit()
+        service = ApiKeysService(ApiKeysRepository(session))
+        authenticated = await service.validate_key(key["key"])
+        assert (
+            await service.enforce_limits_for_request(
+                authenticated.id, request_model="gpt-5.1", expected_attribution_id=authenticated.attribution_id
+            )
+            is None
+        )
+        snapshot = await session.get(ApiKeyAttribution, authenticated.attribution_id)
+        assert snapshot is not None
+        assert snapshot.team_id == "default"

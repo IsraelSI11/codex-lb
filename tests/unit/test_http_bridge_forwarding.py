@@ -1694,3 +1694,57 @@ async def test_iter_sse_event_blocks_receive_timeout_is_scheduler_owned() -> Non
     await scheduler.cancel_owned_tasks()
     assert scheduler.owned_tasks == frozenset()
     assert scheduler.pending_timers == 0
+
+
+def test_forwarded_attribution_is_signed_and_cannot_fall_back_to_legacy():
+    from app.modules.proxy.http_bridge_forwarding import HTTP_BRIDGE_ATTRIBUTION_HEADER
+
+    context = HTTPBridgeForwardContext(
+        origin_instance="origin",
+        target_instance="owner",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        api_key_attribution_id="assignment-a",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=_payload(), context=context)
+    forwarded, error = parse_forwarded_request(headers, payload=_payload(), current_instance="owner")
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.api_key_attribution_id == "assignment-a"
+    headers[HTTP_BRIDGE_ATTRIBUTION_HEADER] = "assignment-b"
+    forwarded, error = parse_forwarded_request(headers, payload=_payload(), current_instance="owner")
+    assert forwarded is None
+    assert error is not None
+
+
+@pytest.mark.asyncio
+async def test_internal_forward_rejects_assignment_change_before_execution(monkeypatch):
+    import json
+
+    from starlette.requests import Request
+
+    from app.modules.proxy import api
+
+    context = HTTPBridgeForwardContext(
+        origin_instance="origin",
+        target_instance="owner",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        api_key_attribution_id="assignment-a",
+    )
+    monkeypatch.setattr(
+        api, "parse_forwarded_request", lambda *args, **kwargs: (SimpleNamespace(context=context), None)
+    )
+
+    async def authenticate(request):
+        return SimpleNamespace(id="stable-key", attribution_id="assignment-b"), None
+
+    monkeypatch.setattr(api, "_validate_internal_bridge_api_key", authenticate)
+    request = Request({"type": "http", "method": "POST", "path": "/internal/bridge/responses", "headers": []})
+    from typing import cast
+
+    from app.modules.proxy.api import ProxyContext
+
+    response = await api.internal_bridge_responses(request, _payload(), cast(ProxyContext, SimpleNamespace()))
+    assert response.status_code == 409
+    assert json.loads(bytes(response.body))["error"]["code"] == "api_key_attribution_changed"

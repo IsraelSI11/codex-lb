@@ -22,6 +22,7 @@ from sqlalchemy.orm import aliased, selectinload
 from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
 from app.db.models import (
     ApiKey,
+    ApiKeyAttribution,
     ApiKeyDeactivatedReason,
     DashboardIdentity,
     DashboardRoleRecord,
@@ -528,6 +529,9 @@ class DashboardUsersRepository:
         from app.db.models import TeamMember
 
         referenced_key = select(ApiKey.id).where(ApiKey.owner_user_id == DashboardUser.id).exists()
+        referenced_history = (
+            select(ApiKeyAttribution.id).where(ApiKeyAttribution.owner_user_id == DashboardUser.id).exists()
+        )
         referenced_member = select(TeamMember.user_id).where(TeamMember.user_id == DashboardUser.id).exists()
         expired_invite = (
             select(DashboardUserInvite.id)
@@ -548,7 +552,7 @@ class DashboardUsersRepository:
                 delete(DashboardUser)
                 .where(DashboardUser.status == DashboardUserStatus.INVITED.value)
                 .where(expired_invite)
-                .where(~live_invite, ~referenced_key, ~referenced_member)
+                .where(~live_invite, ~referenced_key, ~referenced_member, ~referenced_history)
                 .returning(DashboardUser.id)
                 .execution_options(synchronize_session=False)
             )
@@ -714,10 +718,13 @@ class DashboardUsersRepository:
 
         await self._lock_owner(user.id)
         referenced_key = await self._session.scalar(select(ApiKey.id).where(ApiKey.owner_user_id == user.id).limit(1))
+        referenced_history = await self._session.scalar(
+            select(ApiKeyAttribution.id).where(ApiKeyAttribution.owner_user_id == user.id).limit(1)
+        )
         membership = await self._session.scalar(
             select(TeamMember.team_id).where(TeamMember.user_id == user.id).limit(1)
         )
-        if referenced_key is not None or membership is not None:
+        if referenced_key is not None or membership is not None or referenced_history is not None:
             raise DashboardConflictError(
                 "Developer is referenced by teams or keys; disable the account to retain history"
             )

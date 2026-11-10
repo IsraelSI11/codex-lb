@@ -139,6 +139,7 @@ class _ApiKeyUsageMixin:
                 try:
                     return await service.enforce_limits_for_request(
                         api_key.id,
+                        expected_attribution_id=api_key.attribution_id,
                         request_model=request_model,
                         request_service_tier=request_service_tier,
                         request_usage_budget=request_usage_budget,

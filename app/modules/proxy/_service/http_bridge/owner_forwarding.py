@@ -398,6 +398,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
+        api_key: ApiKeyData | None = None,
         file_owner_account_id: str | None = None,
         client_ip: str | None = None,
     ) -> AsyncIterator[str]:
@@ -418,6 +419,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             origin_instance=current_instance,
             target_instance=owner_forward.owner_instance,
             reservation=api_key_reservation,
+            api_key_attribution_id=api_key.attribution_id if api_key is not None else None,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
             original_request_unanchored=(

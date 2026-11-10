@@ -61,6 +61,9 @@ def test_existing_key_migrates_without_changing_secret_or_state(tmp_path):
         )
         assert conn.execute(text("SELECT current_value FROM api_key_limits WHERE id=51")).scalar() == 7
     assert check_schema_drift(url) == ()
+    command.downgrade(_build_alembic_config(url), parent)
+    run_upgrade(url, "head", bootstrap_legacy=False)
+    assert check_schema_drift(url) == ()
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO teams (id,name) VALUES ('backend','Backend')"))
         conn.execute(
@@ -91,7 +94,12 @@ def test_existing_key_migrates_without_changing_secret_or_state(tmp_path):
         assert conn.execute(text("SELECT team_id FROM api_keys WHERE id='legacy'")).scalar() == "backend"
         assert conn.execute(text("SELECT current_value FROM api_key_limits WHERE id=52")).scalar() == 25
     assert check_schema_drift(url) == ()
-    command.downgrade(_build_alembic_config(url), parent)
-    run_upgrade(url, "head", bootstrap_legacy=False)
-    assert check_schema_drift(url) == ()
+    # Replay preserves the original snapshot even after direct legacy assignment edits.
+    with engine.connect() as conn:
+        assert (
+            conn.execute(text("SELECT team_id FROM api_key_attributions WHERE api_key_id='legacy'")).scalar()
+            == "default"
+        )
+    with pytest.raises(RuntimeError, match="multiple historical assignments"):
+        command.downgrade(_build_alembic_config(url), parent)
     engine.dispose()

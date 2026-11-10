@@ -205,6 +205,7 @@ class HourlyUsageRollupRow:
     service_tier: str
     request_kind: str
     is_deleted: bool
+    api_key_attribution_id: str = DIMENSION_SENTINEL
     request_count: int = 0
     error_count: int = 0
     cancelled_count: int = 0
@@ -260,6 +261,7 @@ _HOURLY_KEY_COLUMNS = (
     "service_tier",
     "request_kind",
     "is_deleted",
+    "api_key_attribution_id",
 )
 _HOURLY_MEASURE_COLUMNS = (
     "request_count",
@@ -503,6 +505,7 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
     bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
     account_id = _dimension_expr(RequestLog.account_id).label("account_id")
     api_key_id = _dimension_expr(RequestLog.api_key_id).label("api_key_id")
+    attribution = _dimension_expr(RequestLog.api_key_attribution_id).label("api_key_attribution_id")
     service_tier = _dimension_expr(RequestLog.service_tier).label("service_tier")
     is_deleted = RequestLog.deleted_at.is_not(None).label("is_deleted")
     output_or_reasoning = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
@@ -528,6 +531,7 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
             service_tier,
             RequestLog.request_kind,
             is_deleted,
+            attribution,
             func.count(RequestLog.id),
             func.coalesce(func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)), 0),
             func.coalesce(func.sum(case((RequestLog.status == CANCELLED_STATUS, 1), else_=0)), 0),
@@ -541,7 +545,16 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
             func.coalesce(func.sum(case((RequestLog.cost_usd.is_not(None), 1), else_=0)), 0),
         )
         .where(*window)
-        .group_by(bucket, account_id, api_key_id, RequestLog.model, service_tier, RequestLog.request_kind, is_deleted)
+        .group_by(
+            bucket,
+            account_id,
+            api_key_id,
+            RequestLog.model,
+            service_tier,
+            RequestLog.request_kind,
+            is_deleted,
+            attribution,
+        )
     )
     return insert(RequestUsageHourlyRollup).from_select(list(_HOURLY_KEY_COLUMNS + _HOURLY_MEASURE_COLUMNS), stmt)
 

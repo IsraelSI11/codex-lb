@@ -13,11 +13,13 @@ from typing import Protocol
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.auth.key_attribution import attribution_id
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.thread_cache_identity import (
     THREAD_CACHE_IDENTITY_MODES,
     normalize_thread_cache_identity_mode,
 )
+from app.core.exceptions import ProxyUpstreamError
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
@@ -214,6 +216,13 @@ class ApiKeysRepositoryProtocol(Protocol):
     ) -> ApiKeyUsageTotals: ...
 
 
+class ApiKeyAttributionChangedError(ProxyUpstreamError):
+    status_code = 409
+    code = "api_key_attribution_changed"
+    error_type = "server_error"
+    message = "API key assignment changed during admission; retry the request"
+
+
 class ApiKeyNotFoundError(ValueError):
     pass
 
@@ -368,6 +377,10 @@ class ApiKeyData:
     team_id: str = "default"
     owner_user_id: str | None = None
     attribution_locked: bool = False
+
+    @property
+    def attribution_id(self) -> str:
+        return attribution_id(self.id, self.team_id, self.owner_user_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -901,6 +914,7 @@ class ApiKeysService:
         key_id: str,
         *,
         request_model: str | None,
+        expected_attribution_id: str | None = None,
         request_service_tier: str | None = None,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> ApiKeyUsageReservationData | None:
@@ -909,6 +923,7 @@ class ApiKeysService:
                 return await self._enforce_limits_for_request_once(
                     key_id,
                     request_model=request_model,
+                    expected_attribution_id=expected_attribution_id,
                     request_service_tier=request_service_tier,
                     request_usage_budget=request_usage_budget,
                 )
@@ -932,10 +947,17 @@ class ApiKeysService:
         request_model: str | None,
         request_service_tier: str | None,
         request_usage_budget: ApiKeyRequestUsageBudget | None,
+        expected_attribution_id: str | None,
     ) -> ApiKeyUsageReservationData | None:
         now = utcnow()
         async with sqlite_writer_section():
             row = _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(key_id))
+            if (
+                expected_attribution_id is not None
+                and attribution_id(row.id, row.team_id, row.owner_user_id) != expected_attribution_id
+            ):
+                await self._repository.rollback()
+                raise ApiKeyAttributionChangedError()
             if row.expires_at is not None and row.expires_at < now:
                 raise ApiKeyInvalidError("API key has expired")
             limits_reset = await _lazy_reset_expired_limits(
@@ -946,6 +968,12 @@ class ApiKeysService:
                 if limits_reset
                 else row
             )
+            if (
+                expected_attribution_id is not None
+                and attribution_id(refreshed.id, refreshed.team_id, refreshed.owner_user_id) != expected_attribution_id
+            ):
+                await self._repository.rollback()
+                raise ApiKeyAttributionChangedError()
             if refreshed.expires_at is not None and refreshed.expires_at < now:
                 raise ApiKeyInvalidError("API key has expired")
 

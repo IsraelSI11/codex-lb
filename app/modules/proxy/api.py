@@ -1501,6 +1501,16 @@ async def internal_bridge_responses(
     api_key, auth_error = await _validate_internal_bridge_api_key(request)
     if auth_error is not None:
         return auth_error
+    if api_key is not None and forwarded_request_context.context.api_key_attribution_id != api_key.attribution_id:
+        return _logged_error_json_response(
+            request,
+            409,
+            openai_error(
+                "api_key_attribution_changed",
+                "API key assignment changed during forwarding. Retry the request.",
+                error_type="server_error",
+            ),
+        )
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
@@ -8609,6 +8619,7 @@ async def _enforce_request_limits(
         try:
             return await service.enforce_limits_for_request(
                 api_key.id,
+                expected_attribution_id=api_key.attribution_id,
                 request_model=request_model,
                 request_service_tier=request_service_tier,
                 request_usage_budget=request_usage_budget,
@@ -8793,6 +8804,7 @@ async def _log_source_chat_completion(
                 model_source_id=source.id,
                 model_source_kind=source.kind,
                 api_key_id=api_key.id if api_key is not None else None,
+                api_key_attribution_id=api_key.attribution_id if api_key is not None else None,
                 request_id=ensure_request_id(),
                 model=model,
                 input_tokens=usage.input_tokens if usage is not None else None,

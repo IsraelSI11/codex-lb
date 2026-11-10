@@ -1,7 +1,7 @@
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ApiKey, DashboardUser, Team, TeamMember
+from app.db.models import ApiKey, ApiKeyAttribution, DashboardUser, Team, TeamMember
 
 
 class TeamsRepository:
@@ -32,7 +32,14 @@ class TeamsRepository:
         stmt = select(ApiKey.id).where(ApiKey.team_id == team_id)
         if user_id is not None:
             stmt = stmt.where(ApiKey.owner_user_id == user_id, ApiKey.is_active.is_(True))
-        return (await self.session.execute(stmt.limit(1))).first() is not None
+        if (await self.session.execute(stmt.limit(1))).first() is not None:
+            return True
+        # Membership can be removed once no active current key uses it. Team
+        # deletion, however, must retain immutable historical identities forever.
+        if user_id is None:
+            history = select(ApiKeyAttribution.id).where(ApiKeyAttribution.team_id == team_id).limit(1)
+            return (await self.session.execute(history)).first() is not None
+        return False
 
     async def remove_member(self, team_id: str, user_id: str) -> None:
         await self.session.execute(

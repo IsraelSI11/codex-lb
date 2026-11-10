@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 
+from app.core.auth.key_attribution import attribution_id
 from app.core.utils.time import utcnow
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
@@ -19,6 +20,7 @@ async def test_team_reports_count_once_and_exclude_warmup(async_client):
                 RequestLog(
                     account_id=None,
                     api_key_id=key["id"],
+                    api_key_attribution_id=attribution_id(key["id"], key["teamId"], key.get("ownerUserId")),
                     request_id=kind,
                     model="gpt-5.1",
                     input_tokens=10,
@@ -69,6 +71,7 @@ async def test_personal_totals_span_teams_and_survive_raw_retention(async_client
             session.add(
                 RequestLog(
                     api_key_id=key["id"],
+                    api_key_attribution_id=attribution_id(key["id"], key["teamId"], key.get("ownerUserId")),
                     request_id=f"ana-{index}",
                     model="gpt-5.1",
                     input_tokens=10,
@@ -146,6 +149,9 @@ async def test_reports_preserve_missing_usage_shared_keys_and_cross_account_attr
             session.add(
                 RequestLog(
                     api_key_id=keys[key_index]["id"],
+                    api_key_attribution_id=attribution_id(
+                        keys[key_index]["id"], keys[key_index]["teamId"], keys[key_index].get("ownerUserId")
+                    ),
                     account_id=account,
                     request_id=f"mixed-{index}",
                     model="gpt-5.1",
@@ -207,6 +213,9 @@ async def test_report_filters_and_sql_aggregation_bound_materialization(async_cl
                 session.add(
                     RequestLog(
                         api_key_id=key,
+                        api_key_attribution_id=attribution_id(
+                            key, "default" if index < 3 else other, "scale" if index < 2 else None
+                        ),
                         request_id=f"scale-{hour}-{index}",
                         model=f"model-{hour % 3}",
                         input_tokens=2,
@@ -244,9 +253,9 @@ async def test_report_filters_and_sql_aggregation_bound_materialization(async_cl
     for sql, _ in materialized:
         assert "sum(" in sql.lower()
         if "team_id" in filters:
-            assert sql.count("coalesce(api_keys.team_id, :coalesce_1) = :coalesce_2") == 2
+            assert sql.count("coalesce(api_key_attributions.team_id, :coalesce_1) = :coalesce_2") == 2
         if "developer_id" in filters:
-            assert sql.count("api_keys.owner_user_id = :") == 2
+            assert sql.count("api_key_attributions.owner_user_id = :") == 2
 
 
 @pytest.mark.parametrize("start_minute,end_minute,expected", [(30, 150, 4), (65, 115, 2), (150, 210, 1)])

@@ -15,11 +15,16 @@ Conditional counter updates and transaction rollback prevent partial admission.
 The existing reset, settlement, failure, release and orphan recovery paths handle
 both scopes. Already-admitted streams retain the established reservation contract.
 
-Attribution locks on successful admission, even without configured budgets.
-Used keys cannot be reassigned or deleted: deactivate them and create replacement
-keys. Referenced developers cannot be deleted: disable their accounts instead.
-Preserving these identities makes the existing permanent key rollup dimension a
-stable team/developer dimension without duplicating all usage rollup tables.
+Successful admission retains a permanent used-key marker, even without budgets,
+so used keys must be deactivated rather than deleted. Keys can change team or
+developer while retaining their secret and individual counters. Immutable
+attribution snapshots are captured per request and retained in the hourly grain;
+reports join snapshots instead of current key assignments. A stale authenticated
+snapshot at admission fails with a retryable 409 before any reservation or upstream
+execution. Already admitted streams retain their old snapshot and reservation items.
+Referenced developers/teams remain protected even after current keys move away.
+Migration backfills existing folded buckets directly, preserving pruned history.
+Downgrade refuses multiple historical assignments rather than silently moving them.
 Existing historical orphan-key usage is attributed to Default without a developer.
 Membership removal requires deactivation of active keys; reactivation requires
 current membership and an enabled owner.

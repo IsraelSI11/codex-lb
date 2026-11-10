@@ -2623,6 +2623,7 @@ class _HTTPBridgeStreamingMixin:
             try:
                 async for line in self._forward_http_bridge_request_to_owner(
                     owner_forward=session_or_forward,
+                    api_key=request_state.api_key,
                     payload=effective_payload,
                     headers=session_creation_headers,
                     api_key_reservation=api_key_reservation,

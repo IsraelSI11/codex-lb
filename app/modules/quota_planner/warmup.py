@@ -194,11 +194,15 @@ class QuotaWarmupService:
         if replay_result is not None:
             return replay_result
 
+        api_key_attribution_id: str | None = None
         reservation_id: str | None = None
         if api_key_id is not None:
             try:
+                api_key = await self._api_keys.get_key_by_id(api_key_id)
+                api_key_attribution_id = api_key.attribution_id
                 reservation = await self._api_keys.enforce_limits_for_request(
                     api_key_id,
+                    expected_attribution_id=api_key_attribution_id,
                     request_model=resolved_model,
                     request_usage_budget=ApiKeyRequestUsageBudget(
                         input_tokens=WARMUP_DEFAULT_INPUT_BUDGET,
@@ -289,6 +293,7 @@ class QuotaWarmupService:
             await self._request_logs.add_log(
                 account_id=account_id,
                 api_key_id=api_key_id,
+                api_key_attribution_id=api_key_attribution_id,
                 request_id=request_id,
                 model=resolved_model,
                 input_tokens=usage.input_tokens,
@@ -345,6 +350,7 @@ class QuotaWarmupService:
             await self._request_logs.add_log(
                 account_id=account_id,
                 api_key_id=api_key_id,
+                api_key_attribution_id=api_key_attribution_id,
                 request_id=request_id,
                 model=resolved_model,
                 input_tokens=0,

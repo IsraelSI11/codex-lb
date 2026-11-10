@@ -6567,7 +6567,7 @@ class _WebSocketMixin:
                 await proxy._write_request_log(
                     affinity_observation=request_state.affinity_observation,
                     account_id=account_id_value,
-                    api_key=api_key,
+                    api_key=request_state.api_key or api_key,
                     request_id=request_log_response_id,
                     archive_request_id=request_state.archive_request_id,
                     model=request_state.model or "",
@@ -6733,7 +6733,7 @@ class _WebSocketMixin:
         await proxy._write_request_log(
             affinity_observation=request_state.affinity_observation,
             account_id=account_id,
-            api_key=api_key,
+            api_key=request_state.api_key or api_key,
             request_id=request_state.request_log_id or request_state.request_id,
             archive_request_id=request_state.archive_request_id,
             model=request_state.model or "",

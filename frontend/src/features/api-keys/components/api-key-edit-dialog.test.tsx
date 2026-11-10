@@ -13,6 +13,41 @@ import { ApiKeyEditDialog } from "./api-key-edit-dialog";
 import { hasLimitRuleChanges } from "./limit-rules-utils";
 
 describe("ApiKeyEditDialog", () => {
+  it.each(["bob", ""])("requires explicit destination ownership before saving a used key (%s)", async (owner) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(
+      http.get("/api/teams/", () => HttpResponse.json([
+        { id: "default", name: "Default", assignedAccountIds: null, assignedSourceIds: null, memberUserIds: ["ana"], limits: [] },
+        { id: "destination", name: "Destination", assignedAccountIds: null, assignedSourceIds: null, memberUserIds: ["bob"], limits: [] },
+      ])),
+      http.get("/api/teams/developers", () => HttpResponse.json([
+        { id: "ana", name: "Ana", status: "active" },
+        { id: "bob", name: "Bob", status: "active" },
+        { id: "outsider", name: "Outsider", status: "active" },
+      ])),
+    );
+    const apiKey = createApiKey({ teamId: "default", ownerUserId: "ana", attributionLocked: true, lastUsedAt: "2026-11-09T10:00:00Z" });
+    renderWithProviders(<ApiKeyEditDialog open busy={false} apiKey={apiKey} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    expect(screen.getByText(/Assignment changes affect future requests/)).toBeInTheDocument();
+    await screen.findByRole("option", { name: "Destination" });
+    const developer = screen.getByRole("combobox", { name: "Developer" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Team" }), "destination");
+    expect(developer).toHaveValue("ana");
+    expect(developer).toBeInvalid();
+    expect(within(developer).queryByRole("option", { name: "Outsider" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    await user.selectOptions(developer, owner);
+    expect(developer).toBeValid();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({ teamId: "destination", ownerUserId: owner || null, isActive: apiKey.isActive });
+    for (const field of ["limits", "assignedAccountIds", "assignedSourceIds", "key", "id"]) {
+      expect(onSubmit.mock.calls[0][0]).not.toHaveProperty(field);
+    }
+  });
+
   function ControlledApiKeyEditDialog({
     apiKey = createApiKey({ allowedModels: [] }),
   }: {

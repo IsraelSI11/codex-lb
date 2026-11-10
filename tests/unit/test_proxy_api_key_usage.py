@@ -14,6 +14,7 @@ from app.modules.api_keys.service import (
     API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
     API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
     API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
+    ApiKeyData,
     ApiKeyRequestUsageBudget,
 )
 from app.modules.proxy import api_key_usage
@@ -367,3 +368,38 @@ def test_estimate_request_input_tokens_lone_surrogate_beyond_cap_no_longer_raise
         _legacy_estimate_request_input_tokens(upstream_payload["input"], upstream_payload)
 
     assert _estimate_for(upstream_payload) == API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "websocket"])
+async def test_admission_passes_authenticated_assignment_even_without_limits(monkeypatch, transport):
+    from contextlib import asynccontextmanager
+
+    from app.modules.proxy import api
+
+    seen = []
+
+    class KeysService:
+        def __init__(self, repository):
+            pass
+
+        async def enforce_limits_for_request(self, key_id, **kwargs):
+            seen.append((key_id, kwargs["expected_attribution_id"]))
+            return None
+
+    @asynccontextmanager
+    async def session():
+        yield SimpleNamespace(api_keys=None)
+
+    key = cast(ApiKeyData, SimpleNamespace(id="stable-key", attribution_id="admitted-team-a"))
+    if transport == "http":
+        monkeypatch.setattr(api, "get_background_session", session)
+        monkeypatch.setattr(api, "ApiKeysRepository", lambda session: None)
+        monkeypatch.setattr(api, "ApiKeysService", KeysService)
+        result = await api._enforce_request_limits(key, request_model="model", request_service_tier=None)
+    else:
+        monkeypatch.setattr(proxy_service, "ApiKeysService", KeysService)
+        service = proxy_service.ProxyService(session)
+        result = await service._reserve_websocket_api_key_usage(key, request_model="model", request_service_tier=None)
+    assert result is None
+    assert seen == [("stable-key", "admitted-team-a")]

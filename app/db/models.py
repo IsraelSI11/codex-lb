@@ -337,6 +337,12 @@ class RequestUsageHourlyRollup(Base):
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_id: Mapped[str] = mapped_column(String, primary_key=True)
     api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_attribution_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default="\x1f",
+        server_default=text("'\x1f'"),
+    )
     model: Mapped[str] = mapped_column(String, primary_key=True)
     service_tier: Mapped[str] = mapped_column(String, primary_key=True)
     request_kind: Mapped[str] = mapped_column(String, primary_key=True)
@@ -495,6 +501,11 @@ class RequestLog(Base):
     )
     model_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    api_key_attribution_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("api_key_attributions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     archive_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -2044,6 +2055,27 @@ class ApiKeyLimit(Base):
     reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="limits")
+
+
+class ApiKeyAttribution(Base):
+    """Permanent team/developer identity; referenced by raw and folded usage."""
+
+    __tablename__ = "api_key_attributions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(
+        String, ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    team_id: Mapped[str] = mapped_column(
+        String, ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
 class ApiKeyUsageReservation(Base):

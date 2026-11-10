@@ -559,6 +559,7 @@ class SourceDispatch:
                     model_source_id=self.source.id,
                     model_source_kind=self.source.kind,
                     api_key_id=self.api_key.id if self.api_key is not None else None,
+                    api_key_attribution_id=self.api_key.attribution_id if self.api_key is not None else None,
                     session_id=_owner_lookup_session_id_from_headers(headers),
                     model=self.model,
                     input_tokens=usage.input_tokens if usage is not None else None,

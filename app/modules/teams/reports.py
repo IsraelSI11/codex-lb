@@ -1,7 +1,7 @@
 """Team/developer views of retained key usage, without changing budget counters.
 
-Used keys remain addressable and their attribution cannot change. Therefore the
-existing permanent key dimensions are also stable team/developer dimensions.
+Immutable snapshots survive key reassignment and raw-log retention. Reports
+never infer a historical request's team from the key's current assignment.
 """
 
 from collections import defaultdict
@@ -12,7 +12,7 @@ from sqlalchemy import BigInteger, Integer, cast, func, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive
-from app.db.models import AccountUsageRollupState, ApiKey, RequestLog, RequestUsageHourlyRollup
+from app.db.models import AccountUsageRollupState, ApiKeyAttribution, RequestLog, RequestUsageHourlyRollup
 from app.modules.accounts.usage_time_rollup import (
     _STATE_ROW_ID,
     DIMENSION_SENTINEL,
@@ -71,8 +71,8 @@ async def consumption_report(
     least = func.least if postgres else func.min
     greatest = func.greatest if postgres else func.max
     tail_start = greatest(lo, least(func.coalesce(watermark, lo), hi))
-    team = func.coalesce(ApiKey.team_id, "default")
-    owner = ApiKey.owner_user_id
+    team = func.coalesce(ApiKeyAttribution.team_id, "default")
+    owner = ApiKeyAttribution.owner_user_id
     filters = []
     if team_id is not None:
         filters.append(team == team_id)
@@ -89,7 +89,7 @@ async def consumption_report(
             func.sum(hourly.cost_usd).label("cost"),
         )
         .select_from(hourly)
-        .outerjoin(ApiKey, hourly.api_key_id == _dimension_expr(ApiKey.id))
+        .outerjoin(ApiKeyAttribution, hourly.api_key_attribution_id == _dimension_expr(ApiKeyAttribution.id))
         .where(
             hourly.bucket_epoch >= epoch_seconds(lo),
             hourly.bucket_epoch < epoch_seconds(hi),
@@ -111,7 +111,7 @@ async def consumption_report(
             func.coalesce(func.sum(RequestLog.cost_usd), 0),
         )
         .select_from(RequestLog)
-        .outerjoin(ApiKey, RequestLog.api_key_id == ApiKey.id)
+        .outerjoin(ApiKeyAttribution, RequestLog.api_key_attribution_id == ApiKeyAttribution.id)
         .where(
             RequestLog.requested_at >= since,
             RequestLog.requested_at < until,

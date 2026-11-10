@@ -11,12 +11,14 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, load_only, raiseload, selectinload
 
+from app.core.auth.key_attribution import attribution_id
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
     AccountStatus,
     ApiKey,
     ApiKeyAccountAssignment,
+    ApiKeyAttribution,
     ApiKeyDeactivatedReason,
     ApiKeyLimit,
     ApiKeyModelSourceAssignment,
@@ -201,12 +203,11 @@ class ApiKeysRepository:
         row = await self.get_by_id(key_id)
         if row is None:
             raise DashboardNotFoundError("API key not found")
+        original_assignment = (row.team_id, row.owner_user_id)
         new_team = team_id if team_set else row.team_id
         new_owner = owner_user_id if owner_set else row.owner_user_id
         if (new_team, new_owner) == (row.team_id, row.owner_user_id):
             return
-        if await self.has_usage(key_id):
-            raise DashboardConflictError("Used key attribution is immutable; create a replacement key")
         if new_team is None:
             raise DashboardBadRequestError("Team is required")
         try:
@@ -214,13 +215,30 @@ class ApiKeysRepository:
         except ValueError as exc:
             raise DashboardBadRequestError(str(exc)) from exc
         # Membership/owner locks precede the key lock, matching owner disable
-        # and bulk reactivation. Re-read usage after waiting for admission.
+        # and bulk reactivation. Admission and reassignment serialize here.
         await self._lock_key(key_id)
+        row = await self.get_by_id(key_id)
+        assert row is not None
+        if (row.team_id, row.owner_user_id) != original_assignment:
+            raise DashboardConflictError("API key assignment changed; reload and retry")
         if await self.has_usage(key_id):
-            raise DashboardConflictError("Used key attribution is immutable; create a replacement key")
+            row.attribution_locked = True
+        await self.ensure_attribution(row)
         row.team_id = new_team
         row.owner_user_id = new_owner
+        await self.ensure_attribution(row)
         await self._session.flush()
+
+    async def ensure_attribution(self, row: ApiKey) -> str:
+        snapshot_id = attribution_id(row.id, row.team_id or "default", row.owner_user_id)
+        if await self._session.get(ApiKeyAttribution, snapshot_id) is None:
+            self._session.add(
+                ApiKeyAttribution(
+                    id=snapshot_id, api_key_id=row.id, team_id=row.team_id or "default", owner_user_id=row.owner_user_id
+                )
+            )
+            await self._session.flush()
+        return snapshot_id
 
     async def _lock_key(self, key_id: str) -> None:
         # A no-op UPDATE also takes SQLite's writer lock across processes.
@@ -229,6 +247,8 @@ class ApiKeysRepository:
     async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
         await self.validate_attribution(row.team_id or "default", row.owner_user_id)
         self._session.add(row)
+        await self._session.flush()
+        await self.ensure_attribution(row)
         if commit:
             await self._session.commit()
         created = await self.get_by_id(row.id)
@@ -242,7 +262,7 @@ class ApiKeysRepository:
     async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None:
         """Admission-path load for ``enforce_limits_for_request``.
 
-        The enforcement transaction reads status, immutable attribution and
+        The enforcement transaction reads status, current attribution and
         key/team limits, so this skips the
         ``account_assignments``/``source_assignments`` selectin round trips
         that ``get_by_id`` pays on every proxied request. ``raiseload`` keeps
@@ -266,13 +286,11 @@ class ApiKeysRepository:
         may already hold a fully loaded ``ApiKey`` (e.g. via ``get_by_id`` /
         ``get_by_hash``) without dropping the narrowing first.
         """
-        # Persist the immutable-attribution marker before loading the team.
-        # An edit that wins the row lock is reflected in the SELECT; an edit
-        # that loses must reject the now-used key. Already locked keys need
-        # no further write, preserving the no-limit fast path after first use.
+        # Every admission locks the key, including previously used/unlimited
+        # keys, so reassignment cannot race snapshot validation and reservation.
         await self._session.execute(
             update(ApiKey)
-            .where(ApiKey.id == key_id, ApiKey.attribution_locked.is_(False))
+            .where(ApiKey.id == key_id)
             .values(attribution_locked=True)
             .execution_options(synchronize_session=False)
         )
@@ -281,7 +299,12 @@ class ApiKeysRepository:
             .execution_options(populate_existing=True)
             .options(
                 load_only(
-                    ApiKey.is_active, ApiKey.expires_at, ApiKey.team_id, ApiKey.attribution_locked, raiseload=True
+                    ApiKey.is_active,
+                    ApiKey.expires_at,
+                    ApiKey.team_id,
+                    ApiKey.owner_user_id,
+                    ApiKey.attribution_locked,
+                    raiseload=True,
                 ),
                 selectinload(ApiKey.limits),
                 joinedload(ApiKey.team).selectinload(Team.limits),
@@ -290,7 +313,10 @@ class ApiKeysRepository:
             )
             .where(ApiKey.id == key_id)
         )
-        return result.scalar_one_or_none()
+        row = result.scalar_one_or_none()
+        if row is not None:
+            await self.ensure_attribution(row)
+        return row
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         result = await self._session.execute(self._select_api_key().where(ApiKey.key_hash == key_hash))
